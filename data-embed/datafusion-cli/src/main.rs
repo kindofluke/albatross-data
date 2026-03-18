@@ -5,6 +5,9 @@ use datafusion_substrait::logical_plan;
 use std::fs;
 use std::path::PathBuf;
 
+mod manifest;
+use manifest::ExecutionManifest;
+
 #[derive(Parser, Debug)]
 #[command(name = "datafusion-cli")]
 #[command(about = "DataFusion SQL to Substrait converter", long_about = None)]
@@ -24,6 +27,10 @@ struct Args {
     /// Output path for Substrait plan (.pb file)
     #[arg(short, long)]
     output: PathBuf,
+
+    /// Generate execution manifest (.json) instead of raw Substrait
+    #[arg(short, long)]
+    manifest: bool,
 
     /// Enable verbose output
     #[arg(short, long)]
@@ -79,11 +86,39 @@ async fn main() -> Result<()> {
     substrait_plan.encode(&mut buf)
         .context("Failed to encode Substrait plan")?;
 
-    // Write to file
-    fs::write(&args.output, &buf)
-        .context("Failed to write Substrait plan to file")?;
-
-    println!("✓ Substrait plan written to: {:?} ({} bytes)", args.output, buf.len());
+    if args.manifest {
+        // Generate execution manifest (JSON with Substrait + file paths)
+        if args.verbose {
+            println!("\nGenerating execution manifest...");
+        }
+        
+        let mut manifest = ExecutionManifest::new(args.query.clone(), buf.clone());
+        
+        // Add the Parquet file mapping
+        let absolute_path = std::fs::canonicalize(&args.parquet)
+            .context("Failed to resolve absolute path for Parquet file")?;
+        manifest.add_table(args.table.clone(), absolute_path);
+        
+        // Serialize manifest to JSON
+        let json = serde_json::to_string_pretty(&manifest)
+            .context("Failed to serialize manifest to JSON")?;
+        
+        // Write JSON file
+        let json_path = args.output.with_extension("json");
+        fs::write(&json_path, json)
+            .context("Failed to write manifest to file")?;
+        
+        println!("✓ Execution manifest written to: {:?}", json_path);
+        println!("  - SQL: {}", args.query);
+        println!("  - Tables: {}", manifest.tables.len());
+        println!("  - Substrait size: {} bytes", buf.len());
+    } else {
+        // Write raw Substrait bytes
+        fs::write(&args.output, &buf)
+            .context("Failed to write Substrait plan to file")?;
+        
+        println!("✓ Substrait plan written to: {:?} ({} bytes)", args.output, buf.len());
+    }
 
     Ok(())
 }

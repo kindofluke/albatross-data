@@ -1,3 +1,4 @@
 [submodule "lib/sirius"]
 	path = lib/sirius
 	url = https://github.com/sirius-db/sirius
+	ignore = dirty
