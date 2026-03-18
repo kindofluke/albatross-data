@@ -1,0 +1,14 @@
+[package]
+name = "datafusion-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+datafusion = { workspace = true }
+datafusion-substrait = { workspace = true }
+arrow = { workspace = true }
+parquet = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+prost = { workspace = true }

@@ -1,0 +1,10 @@
+[package]
+name = "generate-test-data"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+arrow = { workspace = true }
+parquet = { workspace = true, features = ["arrow"] }
+rand = { workspace = true }
+anyhow = { workspace = true }
