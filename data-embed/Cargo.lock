@@ -1170,7 +1170,7 @@ dependencies = [
  "object_store",
  "pbjson-types",
  "prost",
- "substrait 0.45.5",
+ "substrait",
  "url",
 ]
 
@@ -1229,14 +1229,9 @@ name = "executor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arrow",
  "clap",
  "datafusion",
- "datafusion-substrait",
- "hex",
- "prost",
- "serde",
- "serde_json",
- "substrait 0.46.3",
  "tokio",
 ]
 
@@ -2704,28 +2699,6 @@ dependencies = [
  "pbjson",
  "pbjson-build",
  "pbjson-types",
- "prettyplease",
- "prost",
- "prost-build",
- "prost-types",
- "regress",
- "schemars",
- "semver",
- "serde",
- "serde_json",
- "serde_yaml",
- "syn",
- "typify",
- "walkdir",
-]
-
-[[package]]
-name = "substrait"
-version = "0.46.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52b67640958c6c33f99bc16c9458bdfed7c906981a2baa3d6faa77928ec78041"
-dependencies = [
- "heck",
  "prettyplease",
  "prost",
  "prost-build",
