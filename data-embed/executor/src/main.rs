@@ -5,6 +5,7 @@ use std::path::PathBuf;
 mod executor;
 mod metrics;
 mod ffi;
+mod velox;
 
 use executor::{ExecutionMode, Executor};
 

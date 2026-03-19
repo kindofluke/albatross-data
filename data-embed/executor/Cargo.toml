@@ -12,7 +12,7 @@ tokio = { workspace = true }
 datafusion = { workspace = true }
 datafusion-substrait = { workspace = true }
 prost = { workspace = true }
-libc = "0.2"
+substrait = "0.46"
 hex = "0.4"
 
 [build-dependencies]
