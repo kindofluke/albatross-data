@@ -1,3 +1,6 @@
 [submodule "lib/sirius"]
 	path = lib/sirius
 	url = https://github.com/sirius-db/sirius
+[submodule "lib/velox"]
+	path = lib/velox
+	url = https://github.com/facebookincubator/velox.git
