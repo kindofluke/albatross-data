@@ -158,8 +158,14 @@ impl Executor {
 
         // Sirius extension is built into this DuckDB, no need to load
         // Initialize GPU buffers
+        if self.verbose {
+            println!("Initializing GPU buffers...");
+        }
         conn.execute("CALL gpu_buffer_init('1 GB', '2 GB', pinned_memory_size := '4 GB');")
             .map_err(|e| anyhow::anyhow!("Failed to initialize GPU buffers: {}", e))?;
+        if self.verbose {
+            println!("GPU buffers initialized");
+        }
 
         // Register parquet tables
         for (table_name, parquet_path) in table_names.iter().zip(parquet_files.iter()) {
