@@ -52,7 +52,7 @@ Four example Substrait plans in `data-embed/output/`:
 - ✅ **SQL Input**: User provides queries
 - ✅ **DataFusion**: Parsing, optimization, schema validation
 - ✅ **Substrait**: Serialization to protobuf
-- ❌ **Sirius**: Not yet integrated (requires CUDA hardware)
+- - **Sirius**: in progress to be implement  (requires CUDA hardware)
 - ❌ **FFI Bridge**: Not yet implemented (Rust ↔ C++)
 - ❌ **Results**: Not yet returned from GPU
 

@@ -8,3 +8,4 @@ arrow = { workspace = true }
 parquet = { workspace = true, features = ["arrow"] }
 rand = { workspace = true }
 anyhow = { workspace = true }
+clap = { workspace = true }
