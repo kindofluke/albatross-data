@@ -8,4 +8,6 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 datafusion = { workspace = true }
+datafusion-substrait = { workspace = true }
 arrow = "53.3.0"
+prost = { workspace = true }

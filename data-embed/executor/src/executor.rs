@@ -2,6 +2,8 @@ use anyhow::Result;
 use std::path::PathBuf;
 use std::time::Instant;
 use datafusion::prelude::*;
+use datafusion_substrait::logical_plan;
+use prost::Message;
 
 pub struct ExecutionResult {
     pub stdout: String,
@@ -90,5 +92,80 @@ impl Executor {
         let df = ctx.sql(query).await?;
         let plan = df.logical_plan();
         Ok(format!("{:#?}", plan))
+    }
+
+    pub async fn physical_plan(
+        &self,
+        parquet_files: &[PathBuf],
+        table_names: &[String],
+        query: &str,
+    ) -> Result<String> {
+        let ctx = SessionContext::new();
+        
+        for (table_name, path) in table_names.iter().zip(parquet_files.iter()) {
+            ctx.register_parquet(
+                table_name,
+                path.to_str().unwrap(),
+                ParquetReadOptions::default()
+            ).await?;
+        }
+
+        let df = ctx.sql(query).await?;
+        let physical_plan = df.create_physical_plan().await?;
+        
+        // Use displayable for pretty formatting
+        use datafusion::physical_plan::displayable;
+        let result = displayable(physical_plan.as_ref()).indent(true).to_string();
+        Ok(result)
+    }
+
+    pub async fn to_substrait(
+        &self,
+        parquet_files: &[PathBuf],
+        table_names: &[String],
+        query: &str,
+    ) -> Result<(Vec<u8>, Box<datafusion_substrait::substrait::proto::Plan>)> {
+        let ctx = SessionContext::new();
+        
+        // Register parquet files
+        for (table_name, path) in table_names.iter().zip(parquet_files.iter()) {
+            if self.verbose {
+                println!("  - {} -> {:?}", table_name, path);
+            }
+            ctx.register_parquet(
+                table_name,
+                path.to_str().unwrap(),
+                ParquetReadOptions::default()
+            ).await?;
+        }
+
+        if self.verbose {
+            println!("\nParsing query: {}", query);
+        }
+
+        // Parse SQL and get optimized logical plan
+        let df = ctx.sql(query).await?;
+        let logical_plan = df.into_optimized_plan()?;
+
+        if self.verbose {
+            println!("\nLogical Plan:");
+            println!("{:#?}", logical_plan);
+        }
+
+        // Convert to Substrait
+        if self.verbose {
+            println!("\nConverting to Substrait...");
+        }
+        let substrait_plan = logical_plan::producer::to_substrait_plan(&logical_plan, &ctx)?;
+
+        // Serialize to bytes
+        let mut buf = Vec::new();
+        substrait_plan.encode(&mut buf)?;
+
+        if self.verbose {
+            println!("Substrait plan size: {} bytes", buf.len());
+        }
+
+        Ok((buf, substrait_plan))
     }
 }

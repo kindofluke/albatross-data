@@ -8,18 +8,45 @@
 
 ## What's Been Built
 
-### 1. DataFusion CLI (`data-embed/datafusion-cli/`)
-- **Purpose**: Parse SQL queries and generate Substrait plans
-- **Input**: SQL query string + Parquet file path
-- **Output**: Substrait protobuf (`.pb` file)
+### 1. Unified Executor (`data-embed/executor/`)
+- **Purpose**: Single CLI for SQL execution, plan inspection, and Substrait generation
+- **Input**: SQL query string + Parquet file path(s)
+- **Modes**:
+  - **Execute**: Run query and return results (default)
+  - **Logical Plan**: `--explain-only` - Show DataFusion logical plan
+  - **Physical Plan**: `--physical-plan` - Show DataFusion physical execution plan
+  - **Substrait Binary**: `--substrait` - Generate Substrait protobuf (`.pb` file)
+  - **Substrait Text**: `--substrait-text` - Generate human-readable Substrait plan
 - **Status**: ✅ Working
 
-**Key Code**: `data-embed/datafusion-cli/src/main.rs`
-- Uses `datafusion` crate for SQL parsing and optimization
+**Key Code**: `data-embed/executor/src/`
+- `executor.rs`: Core execution logic with multiple output modes
+- `main.rs`: CLI argument parsing and mode dispatch
+- Uses `datafusion` for SQL parsing, optimization, and execution
 - Uses `datafusion-substrait::logical_plan::producer::to_substrait_plan()` for serialization
-- Outputs binary protobuf files ready for GPU execution
+- Supports multiple Parquet files with custom table names
 
-### 2. Test Data Generator (`data-embed/generate-test-data/`)
+**Example Usage**:
+```bash
+# Execute query and show results
+cargo run -p executor -- -f data/orders.parquet -q "SELECT COUNT(*) FROM orders"
+
+# Show physical execution plan
+cargo run -p executor -- -f data/orders.parquet -q "SELECT COUNT(*) FROM orders" --physical-plan
+
+# Generate Substrait plan (text format)
+cargo run -p executor -- -f data/orders.parquet -q "SELECT COUNT(*) FROM orders" --substrait-text
+
+# Generate Substrait plan (binary format)
+cargo run -p executor -- -f data/orders.parquet -q "SELECT COUNT(*) FROM orders" --substrait -o plan.pb
+```
+
+### 2. DataFusion CLI (`data-embed/datafusion-cli/`)
+- **Purpose**: Legacy SQL → Substrait converter with manifest generation
+- **Status**: ✅ Working (superseded by executor for most use cases)
+- **Unique Feature**: Generates execution manifests (JSON with Substrait + file paths)
+
+### 3. Test Data Generator (`data-embed/generate-test-data/`)
 - **Purpose**: Create sample Parquet datasets for testing
 - **Output**: `data/orders.parquet` (10,000 rows)
 - **Schema**:
@@ -29,13 +56,6 @@
   - `quantity`: Int32
   - `status`: String (pending/shipped/delivered/cancelled)
 - **Status**: ✅ Working
-
-### 3. Test Queries Generated
-Four example Substrait plans in `data-embed/output/`:
-- `query1.pb`: Simple aggregations (COUNT, SUM, AVG)
-- `query2.pb`: GROUP BY with aggregations
-- `query3.pb`: WHERE filter with LIMIT
-- `query4.pb`: Complex query (GROUP BY + ORDER BY + LIMIT)
 
 ## Architecture Overview
 
@@ -91,12 +111,29 @@ cd data-embed
 # Generate test data (already done)
 cargo run --release --bin generate-test-data
 
-# Convert SQL to Substrait
-cargo run --release --bin datafusion-cli -- \
-  -q "SELECT COUNT(*), SUM(amount) FROM orders WHERE status = 'shipped'" \
-  -p data/orders.parquet \
-  -o output/my_query.pb \
-  -v
+# Execute query and see results
+cargo run -p executor -- \
+  -f data/orders.parquet \
+  -q "SELECT COUNT(*), SUM(amount) FROM orders WHERE status = 'shipped'"
+
+# Inspect physical execution plan
+cargo run -p executor -- \
+  -f data/orders.parquet \
+  -q "SELECT COUNT(*) FROM orders" \
+  --physical-plan
+
+# Generate Substrait plan (human-readable)
+cargo run -p executor -- \
+  -f data/orders.parquet \
+  -q "SELECT COUNT(*) FROM orders" \
+  --substrait-text
+
+# Generate Substrait plan (binary for GPU)
+cargo run -p executor -- \
+  -f data/orders.parquet \
+  -q "SELECT COUNT(*) FROM orders" \
+  --substrait \
+  -o output/my_query.pb
 ```
 
 **Supported SQL**:
@@ -161,19 +198,20 @@ albatross-data/
 ├── AGENT.md                   # This file - implementation guide
 ├── data-embed/                # DataFusion frontend (Rust)
 │   ├── Cargo.toml            # Workspace definition
-│   ├── datafusion-cli/       # SQL → Substrait CLI
+│   ├── executor/             # ⭐ Unified SQL executor
 │   │   ├── Cargo.toml
-│   │   └── src/main.rs       # Main CLI logic
+│   │   └── src/
+│   │       ├── main.rs       # CLI with multiple modes
+│   │       └── executor.rs   # Core execution logic
+│   ├── datafusion-cli/       # Legacy SQL → Substrait CLI
+│   │   ├── Cargo.toml
+│   │   └── src/main.rs
 │   ├── generate-test-data/   # Parquet generator
 │   │   ├── Cargo.toml
 │   │   └── src/main.rs
 │   ├── data/                 # Test datasets
 │   │   └── orders.parquet    # 10K rows
 │   ├── output/               # Generated Substrait plans
-│   │   ├── query1.pb
-│   │   ├── query2.pb
-│   │   ├── query3.pb
-│   │   └── query4.pb
 │   └── README.md             # Usage documentation
 ├── lib/sirius/               # Sirius GPU engine (C++/CUDA)
 │   ├── CLAUDE.md             # Build instructions
