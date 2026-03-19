@@ -26,6 +26,10 @@ enabled_skills = [
     "skill-creator",
     "pydantic*",
     "ag-ui",
+    "tpcds-benchmark", 
+    "dataset-manager", 
+    "config-optimizer", 
+    "build-errors" 
 ]
 disabled_skills = []
 
@@ -109,7 +113,7 @@ max_dirs_per_level = 20
 timeout_seconds = 2.0
 
 [session_logging]
-save_dir = "/Users/luke.shulman/.vibe/logs/session"
+save_dir = "/home/azureuser/.vibe/logs/session"
 session_prefix = "session"
 enabled = true
 
