@@ -41,6 +41,8 @@ build/
 *.duckdb
 data/
 datasets/
+*.pb
+*.parquet
 
 # IDE
 .vscode/
