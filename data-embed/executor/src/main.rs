@@ -3,6 +3,9 @@ use clap::Parser;
 use std::path::PathBuf;
 
 mod executor;
+mod wgsl_shader;
+pub mod wgpu_engine;
+
 use executor::Executor;
 
 #[derive(Parser, Debug)]
