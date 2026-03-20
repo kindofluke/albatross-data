@@ -56,3 +56,4 @@ datasets/
 Thumbs.db
 
 .vibe/config.toml
+data-kernel/bin/data-run

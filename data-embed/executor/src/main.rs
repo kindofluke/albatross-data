@@ -9,8 +9,8 @@ pub mod wgpu_engine;
 use executor::Executor;
 
 #[derive(Parser, Debug)]
-#[command(name = "executor")]
-#[command(about = "Execute SQL queries on Parquet files using DataFusion")]
+#[command(name = "data-run")]
+#[command(about = "Execute SQL queries on Parquet files using DataFusion", long_about = None)]
 struct Args {
     /// SQL query to execute
     #[arg(short, long)]
@@ -24,27 +24,27 @@ struct Args {
     #[arg(short = 't', long = "table")]
     tables: Vec<String>,
 
-    /// Enable verbose output
+    /// Enable verbose output, including timing information
     #[arg(short, long)]
     verbose: bool,
 
-    /// Only show the logical plan; do not execute
+    /// Display the logical plan and exit
     #[arg(long)]
     explain_only: bool,
 
-    /// Show the physical plan; do not execute
+    /// Display the physical plan and exit
     #[arg(long)]
     physical_plan: bool,
 
-    /// Output Substrait plan instead of executing query
+    /// Output the Substrait plan in binary format and exit
     #[arg(long)]
     substrait: bool,
 
-    /// Output Substrait plan as debug text instead of binary
+    /// Output the Substrait plan in text format and exit
     #[arg(long)]
     substrait_text: bool,
 
-    /// Output file for Substrait plan (when --substrait is used)
+    /// Path to save the Substrait plan to (valid only with --substrait or --substrait-text)
     #[arg(short, long)]
     output: Option<PathBuf>,
 }

@@ -1,0 +1,29 @@
+[project]
+name = "data-kernel"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "LukeS", email = "luke.shulman@datarobot.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "ipykernel",
+    "pandas",
+]
+
+[project.optional-dependencies]
+dev = ["jupyterlab"]
+
+[project.entry-points."jupyter_kernels"]
+data-kernel = "data_kernel.kernel:DataKernel"
+
+[project.scripts]
+data-kernel = "data_kernel:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+zip-safe = false
