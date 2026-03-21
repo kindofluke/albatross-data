@@ -43,6 +43,7 @@ data/
 datasets/
 *.pb
 *.parquet
+.ipynb_checkpoints
 
 # IDE
 .vscode/
