@@ -3,6 +3,10 @@ name = "executor"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "executor"
+crate-type = ["cdylib", "rlib"]
+
 [[bin]]
 name = "data-run"
 path = "src/main.rs"
@@ -13,7 +17,7 @@ clap = { workspace = true }
 tokio = { workspace = true }
 datafusion = { workspace = true }
 datafusion-substrait = { workspace = true }
-arrow = "53.3.0"
+arrow = { version = "53.3.0", features = ["ffi"] }
 prost = { workspace = true }
 wgpu = "23"
 bytemuck = { version = "1.14", features = ["derive"] }

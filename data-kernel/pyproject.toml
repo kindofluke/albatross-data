@@ -10,13 +10,12 @@ requires-python = ">=3.12"
 dependencies = [
     "ipykernel",
     "pandas",
+    "pyarrow",
+    "jupyter-mimetypes"
 ]
 
 [project.optional-dependencies]
 dev = ["jupyterlab"]
-
-[project.entry-points."jupyter_kernels"]
-data-kernel = "data_kernel.kernel:DataKernel"
 
 [project.scripts]
 data-kernel = "data_kernel:main"
@@ -25,5 +24,3 @@ data-kernel = "data_kernel:main"
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-zip-safe = false

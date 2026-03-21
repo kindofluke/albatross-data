@@ -47,6 +47,10 @@ struct Args {
     /// Path to save the Substrait plan to (valid only with --substrait or --substrait-text)
     #[arg(short, long)]
     output: Option<PathBuf>,
+
+    /// Output results in CSV format instead of pretty table
+    #[arg(long)]
+    csv: bool,
 }
 
 #[tokio::main]
@@ -138,7 +142,7 @@ async fn main() -> Result<()> {
 
     // Execute query
     let result = executor
-        .execute(&args.files, &table_names, &args.query)
+        .execute(&args.files, &table_names, &args.query, args.csv)
         .await
         .context("Failed to execute query")?;
 
