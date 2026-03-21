@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
-use crate::wgsl_shader::{GLOBAL_AGG_PASS1_SHADER, GLOBAL_AGG_PASS2_SHADER, GROUP_BY_AGG_SHADER};
+use crate::wgsl_shader::{GLOBAL_AGG_PASS1_SHADER, GLOBAL_AGG_PASS2_SHADER, GROUP_BY_AGG_SHADER, HASH_JOIN_BUILD_SHADER, HASH_JOIN_PROBE_SHADER};
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
@@ -498,5 +498,289 @@ impl WgpuEngine {
         staging_buffer.unmap();
 
         Ok(results)
+    }
+
+    pub async fn execute_hash_join_aggregate(
+        &self,
+        build_keys: &[i32],
+        probe_keys: &[i32],
+        probe_values: &[f32],
+    ) -> Result<AggregateResult> {
+        // Hash table size: 2x build side for ~50% load factor
+        let table_size = (build_keys.len() * 2).next_power_of_two();
+        
+        // PHASE 1: Build hash table
+        let build_keys_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Build Keys Buffer"),
+            contents: bytemuck::cast_slice(build_keys),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        // Hash table entries: (key: i32, exists: u32) = 8 bytes
+        #[repr(C)]
+        #[derive(Copy, Clone, Pod, Zeroable)]
+        struct HashEntry {
+            key: i32,
+            exists: u32,
+        }
+        
+        let init_table: Vec<HashEntry> = vec![HashEntry { key: 0, exists: 0 }; table_size];
+        let hash_table_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Hash Table Buffer"),
+            contents: bytemuck::cast_slice(&init_table),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        });
+
+        let build_shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Hash Join Build Shader"),
+            source: wgpu::ShaderSource::Wgsl(HASH_JOIN_BUILD_SHADER.into()),
+        });
+
+        let build_layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Build Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let build_pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Build Pipeline Layout"),
+            bind_group_layouts: &[&build_layout],
+            push_constant_ranges: &[],
+        });
+
+        let build_pipeline = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Build Pipeline"),
+            layout: Some(&build_pipeline_layout),
+            module: &build_shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let build_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Build Bind Group"),
+            layout: &build_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: build_keys_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: hash_table_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        // PHASE 2: Probe and aggregate
+        let probe_keys_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Probe Keys Buffer"),
+            contents: bytemuck::cast_slice(probe_keys),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let probe_values_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Probe Values Buffer"),
+            contents: bytemuck::cast_slice(probe_values),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let init_result = AggregateResult {
+            sum: 0_f32.to_bits(),
+            count: 0,
+            min: f32::MAX.to_bits(),
+            max: f32::MIN.to_bits(),
+        };
+        let result_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Result Buffer"),
+            contents: bytemuck::bytes_of(&init_result),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        });
+
+        let probe_shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Hash Join Probe Shader"),
+            source: wgpu::ShaderSource::Wgsl(HASH_JOIN_PROBE_SHADER.into()),
+        });
+
+        let probe_layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Probe Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let probe_pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Probe Pipeline Layout"),
+            bind_group_layouts: &[&probe_layout],
+            push_constant_ranges: &[],
+        });
+
+        let probe_pipeline = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Probe Pipeline"),
+            layout: Some(&probe_pipeline_layout),
+            module: &probe_shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let probe_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Probe Bind Group"),
+            layout: &probe_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: probe_keys_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: probe_values_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: hash_table_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: result_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Staging Buffer"),
+            size: std::mem::size_of::<AggregateResult>() as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Execute both phases
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Hash Join Encoder"),
+        });
+
+        // Build phase
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Build Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&build_pipeline);
+            pass.set_bind_group(0, &build_bind_group, &[]);
+            
+            let workgroup_count = (build_keys.len() as u32 + 255) / 256;
+            if workgroup_count <= 65535 {
+                pass.dispatch_workgroups(workgroup_count, 1, 1);
+            } else {
+                let x = 65535;
+                let y = (workgroup_count + 65534) / 65535;
+                pass.dispatch_workgroups(x, y, 1);
+            }
+        }
+
+        // Probe phase
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Probe Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&probe_pipeline);
+            pass.set_bind_group(0, &probe_bind_group, &[]);
+            
+            let workgroup_count = (probe_keys.len() as u32 + 255) / 256;
+            if workgroup_count <= 65535 {
+                pass.dispatch_workgroups(workgroup_count, 1, 1);
+            } else {
+                let x = 65535;
+                let y = (workgroup_count + 65534) / 65535;
+                pass.dispatch_workgroups(x, y, 1);
+            }
+        }
+
+        encoder.copy_buffer_to_buffer(
+            &result_buffer,
+            0,
+            &staging_buffer,
+            0,
+            std::mem::size_of::<AggregateResult>() as u64,
+        );
+
+        self.queue.submit(Some(encoder.finish()));
+
+        // Read result
+        let buffer_slice = staging_buffer.slice(..);
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            sender.send(result).unwrap();
+        });
+        
+        self.device.poll(wgpu::Maintain::Wait);
+        receiver.await.context("Failed to map buffer")??;
+
+        let data = buffer_slice.get_mapped_range();
+        let result: AggregateResult = *bytemuck::from_bytes(&data);
+        drop(data);
+        staging_buffer.unmap();
+
+        Ok(result)
     }
 }

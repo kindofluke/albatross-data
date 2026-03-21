@@ -66,6 +66,157 @@ fn main(
 }
 "#;
 
+/// Hash join shader - Build phase: Create hash table from build side keys
+pub const HASH_JOIN_BUILD_SHADER: &str = r#"
+struct HashEntry {
+    key: atomic<i32>,
+    exists: atomic<u32>,
+}
+
+@group(0) @binding(0) var<storage, read> build_keys: array<i32>;
+@group(0) @binding(1) var<storage, read_write> hash_table: array<HashEntry>;
+
+fn hash(key: i32, table_size: u32) -> u32 {
+    // Simple modulo hash
+    let k = u32(key);
+    return k % table_size;
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let idx = global_id.y * 65535u * 256u + global_id.x;
+    if (idx >= arrayLength(&build_keys)) {
+        return;
+    }
+    
+    let key = build_keys[idx];
+    let table_size = arrayLength(&hash_table);
+    var slot = hash(key, table_size);
+    
+    // Linear probing to find empty slot
+    for (var probe = 0u; probe < table_size; probe = probe + 1u) {
+        let current_exists = atomicLoad(&hash_table[slot].exists);
+        if (current_exists == 0u) {
+            // Try to claim this slot
+            let old = atomicCompareExchangeWeak(&hash_table[slot].exists, 0u, 1u);
+            if (old.exchanged) {
+                // We claimed it, write the key
+                atomicStore(&hash_table[slot].key, key);
+                return;
+            }
+        }
+        
+        // Check if this slot already has our key
+        let stored_key = atomicLoad(&hash_table[slot].key);
+        if (stored_key == key) {
+            return;
+        }
+        
+        // Move to next slot
+        slot = (slot + 1u) % table_size;
+    }
+}
+"#;
+
+/// Hash join shader - Probe phase: Probe hash table and aggregate matches
+pub const HASH_JOIN_PROBE_SHADER: &str = r#"
+struct HashEntry {
+    key: atomic<i32>,
+    exists: atomic<u32>,
+}
+
+struct AggregateResult {
+    sum: atomic<u32>,
+    count: atomic<u32>,
+    min: atomic<u32>,
+    max: atomic<u32>,
+}
+
+@group(0) @binding(0) var<storage, read> probe_keys: array<i32>;
+@group(0) @binding(1) var<storage, read> probe_values: array<f32>;
+@group(0) @binding(2) var<storage, read> hash_table: array<HashEntry>;
+@group(0) @binding(3) var<storage, read_write> result: AggregateResult;
+
+fn hash(key: i32, table_size: u32) -> u32 {
+    let k = u32(key);
+    return k % table_size;
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let idx = global_id.y * 65535u * 256u + global_id.x;
+    if (idx >= arrayLength(&probe_keys)) {
+        return;
+    }
+    
+    let key = probe_keys[idx];
+    let val = probe_values[idx];
+    let table_size = arrayLength(&hash_table);
+    var slot = hash(key, table_size);
+    
+    // Linear probing to find matching key
+    for (var probe = 0u; probe < table_size; probe = probe + 1u) {
+        let exists = atomicLoad(&hash_table[slot].exists);
+        if (exists == 0u) {
+            // Empty slot means key not found
+            return;
+        }
+        
+        let stored_key = atomicLoad(&hash_table[slot].key);
+        if (stored_key == key) {
+            // Match found! Aggregate the value
+            atomicAdd(&result.count, 1u);
+            
+            // Sum
+            loop {
+                let old_bits = atomicLoad(&result.sum);
+                let old_val = bitcast<f32>(old_bits);
+                let new_val = old_val + val;
+                let new_bits = bitcast<u32>(new_val);
+                let exchanged = atomicCompareExchangeWeak(&result.sum, old_bits, new_bits);
+                if (exchanged.exchanged) {
+                    break;
+                }
+            }
+            
+            // Min
+            loop {
+                let old_bits = atomicLoad(&result.min);
+                let old_val = bitcast<f32>(old_bits);
+                if (val >= old_val) {
+                    break;
+                }
+                let new_bits = bitcast<u32>(val);
+                let exchanged = atomicCompareExchangeWeak(&result.min, old_bits, new_bits);
+                if (exchanged.exchanged) {
+                    break;
+                }
+            }
+            
+            // Max
+            loop {
+                let old_bits = atomicLoad(&result.max);
+                let old_val = bitcast<f32>(old_bits);
+                if (val <= old_val) {
+                    break;
+                }
+                let new_bits = bitcast<u32>(val);
+                let exchanged = atomicCompareExchangeWeak(&result.max, old_bits, new_bits);
+                if (exchanged.exchanged) {
+                    break;
+                }
+            }
+            
+            return;
+        }
+        
+        slot = (slot + 1u) % table_size;
+    }
+}
+"#;
+
+
+
 /// Two-pass global aggregation shader - Pass 2: Final reduction
 /// Reduces workgroup results to single final result
 pub const GLOBAL_AGG_PASS2_SHADER: &str = r#"
@@ -77,6 +228,7 @@ struct AggregateResult {
 }
 
 struct AtomicResult {
+
     sum: atomic<u32>,
     count: atomic<u32>,
     min: atomic<u32>,

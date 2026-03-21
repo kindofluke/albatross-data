@@ -1336,6 +1336,7 @@ dependencies = [
  "futures",
  "pollster",
  "prost",
+ "rand",
  "tokio",
  "wgpu",
 ]

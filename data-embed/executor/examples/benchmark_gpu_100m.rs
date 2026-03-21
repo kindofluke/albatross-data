@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::time::Instant;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use rand::Rng;
 
 // Import from executor crate
 use executor::wgpu_engine::WgpuEngine;
@@ -208,11 +209,89 @@ async fn main() -> Result<()> {
     println!("Speedup: {:.2}x", speedup);
     println!();
 
+    // Test 6: Hash Join with Aggregation
+    println!("=== Test 6: Hash Join + Aggregation (orders JOIN order_items) ===");
+    
+    // Simulate: SELECT SUM(oi.price) FROM orders o JOIN order_items oi ON o.id = oi.order_id
+    // Build side: 1M orders (smaller)
+    // Probe side: 5M order_items (larger, ~5 items per order on average)
+    let num_orders = 1_000_000;
+    let num_items = 5_000_000;
+    
+    println!("Build side: {} orders", num_orders);
+    println!("Probe side: {} order_items", num_items);
+    
+    // Generate order IDs (build side)
+    let order_ids: Vec<i32> = (0..num_orders as i32).collect();
+    
+    // Generate order_items (probe side) - each references a random order
+    let mut rng = rand::thread_rng();
+    let item_order_ids: Vec<i32> = (0..num_items)
+        .map(|_| rng.gen_range(0..num_orders as i32))
+        .collect();
+    let item_prices: Vec<f32> = (0..num_items)
+        .map(|_| rng.gen_range(5.0..500.0))
+        .collect();
+    
+    // CPU: Hash join with aggregation
+    let start = Instant::now();
+    let mut order_set = HashSet::new();
+    for &order_id in &order_ids {
+        order_set.insert(order_id);
+    }
+    
+    let mut cpu_sum = 0.0f32;
+    let mut cpu_count = 0u32;
+    let mut cpu_min = f32::MAX;
+    let mut cpu_max = f32::MIN;
+    
+    for i in 0..num_items {
+        if order_set.contains(&item_order_ids[i]) {
+            let price = item_prices[i];
+            cpu_sum += price;
+            cpu_count += 1;
+            cpu_min = cpu_min.min(price);
+            cpu_max = cpu_max.max(price);
+        }
+    }
+    let cpu_time = start.elapsed();
+    
+    println!("CPU: {} matches, sum={:.2}, avg={:.2}, min={:.2}, max={:.2} in {}",
+             cpu_count, cpu_sum, cpu_sum / cpu_count as f32, cpu_min, cpu_max,
+             format_duration(cpu_time.as_secs_f64() * 1000.0));
+    
+    // GPU: Hash join with aggregation
+    let start = Instant::now();
+    let gpu_result = engine.execute_hash_join_aggregate(&order_ids, &item_order_ids, &item_prices).await?;
+    let gpu_time = start.elapsed();
+    
+    let gpu_sum = gpu_result.sum_f32();
+    let gpu_count = gpu_result.count;
+    let gpu_min = gpu_result.min_f32();
+    let gpu_max = gpu_result.max_f32();
+    
+    println!("GPU: {} matches, sum={:.2}, avg={:.2}, min={:.2}, max={:.2} in {}",
+             gpu_count, gpu_sum, gpu_sum / gpu_count as f32, gpu_min, gpu_max,
+             format_duration(gpu_time.as_secs_f64() * 1000.0));
+    
+    // Verify accuracy
+    let count_match = cpu_count == gpu_count;
+    let sum_error = (cpu_sum - gpu_sum).abs() / cpu_sum * 100.0;
+    let avg_error = ((cpu_sum / cpu_count as f32) - (gpu_sum / gpu_count as f32)).abs() / (cpu_sum / cpu_count as f32) * 100.0;
+    
+    println!("Accuracy: count_match={}, sum_error={:.4}%, avg_error={:.4}%",
+             count_match, sum_error, avg_error);
+    
+    let speedup = cpu_time.as_secs_f64() / gpu_time.as_secs_f64();
+    println!("Speedup: {:.2}x", speedup);
+    println!();
+
     println!("=== Benchmark Complete ===");
     println!("\nSummary:");
     println!("- Dataset: 30M rows (GPU binding limit: 128MB)");
-    println!("- GPU: Functional for GROUP BY aggregations");
+    println!("- GPU: Functional for GROUP BY aggregations and hash joins");
     println!("- Best use case: GROUP BY with moderate cardinality (100-1000 groups)");
+    println!("- Hash joins: Efficient for inner joins with single key");
     println!("- Limitation: Global aggregation has atomic contention issues");
     println!("- Note: For 100M+ rows, chunked processing would be needed");
 
