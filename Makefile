@@ -6,8 +6,8 @@ build:
 	cd data-embed && cargo build --release
 	mkdir -p $(DATA_KERNEL_DIR)/bin
 	cp data-embed/target/release/data-run $(DATA_KERNEL_DIR)/bin/
-	cp data-embed/target/release/libexecutor.dylib $(DATA_KERNEL_DIR)/bin/
-	cp data-embed/target/release/libexecutor.dylib $(DATA_KERNEL_DIR)/src/data_kernel/
+	cp data-embed/target/release/libexecutor.so $(DATA_KERNEL_DIR)/bin/
+	cp data-embed/target/release/libexecutor.so $(DATA_KERNEL_DIR)/src/data_kernel/
 	cd $(DATA_KERNEL_DIR) && uv build
 
 .PHONY: build

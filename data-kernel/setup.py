@@ -16,6 +16,6 @@ setup(
     version='0.1.0',
     packages=['data_kernel'],
     package_dir={'': 'src'},
-    package_data={'data_kernel': ['data-run', 'libexecutor.dylib']},
+    package_data={'data_kernel': ['data-run', 'libexecutor.*']},
     ext_modules=[arrow_bridge],
 )
