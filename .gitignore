@@ -58,3 +58,4 @@ Thumbs.db
 
 .vibe/config.toml
 data-kernel/bin/data-run
+data-kernel/docker/source/

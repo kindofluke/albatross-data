@@ -9,6 +9,7 @@ arrow_bridge = Extension(
     sources=['src/data_kernel/arrow_bridge.c'],
     library_dirs=[package_dir],
     libraries=['executor'],
+    runtime_library_dirs=['$ORIGIN'],
 )
 
 setup(

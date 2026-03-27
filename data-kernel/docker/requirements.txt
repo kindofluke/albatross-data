@@ -1,3 +1,5 @@
+jupyterlab
+ipython
 Pillow==10.3.0
 altair==4.2.0
 boto3==1.34.90

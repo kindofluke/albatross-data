@@ -149,15 +149,45 @@ FROM minimal AS builder
 ARG WORKDIR
 ARG VENV_PATH
 ARG PYTHON_VERSION
+ARG UNAME
+ARG UID
+ARG GID
+
+# Copy source files and build wheel inside Docker for platform compatibility
+COPY --chown=$UNAME:$UNAME ./source/data-embed /tmp/data-embed
+COPY --chown=$UNAME:$UNAME ./source/data-kernel /tmp/data-kernel
+
+# Install newer protoc (3.12.4 in Ubuntu 22.04 doesn't support proto3_optional)
+USER root
+RUN PROTOC_VERSION=25.1 \
+  && curl -LO https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip \
+  && unzip -o protoc-${PROTOC_VERSION}-linux-x86_64.zip -d /usr/local bin/protoc \
+  && unzip -o protoc-${PROTOC_VERSION}-linux-x86_64.zip -d /usr/local 'include/*' \
+  && rm protoc-${PROTOC_VERSION}-linux-x86_64.zip \
+  && chmod +x /usr/local/bin/protoc
+USER $UNAME
+
+# Update Rust to support Cargo.lock version 4
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable \
+  && . $HOME/.cargo/env \
+  && cd /tmp/data-embed && cargo build --release \
+  && mkdir -p /tmp/data-kernel/bin \
+  && cp /tmp/data-embed/target/release/data-run /tmp/data-kernel/bin/ \
+  && cp /tmp/data-embed/target/release/libexecutor.so /tmp/data-kernel/bin/ \
+  && cp /tmp/data-embed/target/release/libexecutor.so /tmp/data-kernel/src/data_kernel/ \
+  && cd /tmp/data-kernel && pip wheel --no-deps -w /tmp/wheels .
 
 COPY ./kernel.json ${VENV_PATH}/share/jupyter/kernels/python3/
+COPY ./kernel-sql.json /tmp/kernelspecs/data-kernel-sql/kernel.json
+COPY ./kernel-python-datakernel.json /tmp/kernelspecs/data-kernel-python/kernel.json
 COPY ./requirements.txt ${WORKDIR}/
 COPY ./requirements-gpu.txt ${WORKDIR}/
-COPY ./data_kernel-*.whl ${WORKDIR}/
 RUN pip install --use-deprecated=legacy-resolver --no-cache-dir -r ${WORKDIR}/requirements.txt \
   && pip install --no-cache-dir -r ${WORKDIR}/requirements-gpu.txt \
-  && pip install --no-cache-dir ${WORKDIR}/data_kernel-*.whl \
-  && rm ${WORKDIR}/requirements.txt && rm ${WORKDIR}/requirements-gpu.txt
+  && pip install --no-cache-dir /tmp/wheels/data_kernel-*.whl \
+  && rm ${WORKDIR}/requirements.txt && rm ${WORKDIR}/requirements-gpu.txt \
+  && jupyter kernelspec install --user --name=data-kernel-sql /tmp/kernelspecs/data-kernel-sql \
+  && jupyter kernelspec install --user --name=data-kernel-python /tmp/kernelspecs/data-kernel-python
 
 FROM base AS kernel
 
