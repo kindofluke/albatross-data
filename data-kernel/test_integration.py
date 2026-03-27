@@ -19,8 +19,8 @@ def test_arrow_bridge():
     
     test_queries = [
         ('Simple COUNT', 'SELECT COUNT(*) as count FROM orders'),
-        ('Multiple tables', 'SELECT COUNT(*) FROM orders_10m'),
-    ]
+        ('Data', 'SELECT * FROM orders limit 10'),
+]
     
     for name, query in test_queries:
         print(f"\n{name}: {query}")

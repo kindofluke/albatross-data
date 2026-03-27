@@ -109,7 +109,7 @@ static PyObject* execute_query(PyObject* self, PyObject* args) {
         return NULL;
     }
 
-    // Import pyarrow and create Array from capsules
+    // Import pyarrow and create RecordBatch from capsules
     PyObject* pyarrow_module = PyImport_ImportModule("pyarrow");
     if (!pyarrow_module) {
         Py_DECREF(schema_capsule);
@@ -118,21 +118,21 @@ static PyObject* execute_query(PyObject* self, PyObject* args) {
         return NULL;
     }
 
-    // Get the Array class
-    PyObject* array_class = PyObject_GetAttrString(pyarrow_module, "Array");
-    if (!array_class) {
+    // Get the RecordBatch class
+    PyObject* recordbatch_class = PyObject_GetAttrString(pyarrow_module, "RecordBatch");
+    if (!recordbatch_class) {
         Py_DECREF(pyarrow_module);
         Py_DECREF(schema_capsule);
         Py_DECREF(array_capsule);
-        PyErr_SetString(PyExc_AttributeError, "Array class not found in pyarrow.");
+        PyErr_SetString(PyExc_AttributeError, "RecordBatch class not found in pyarrow.");
         return NULL;
     }
 
-    // Call Array._import_from_c_capsule(schema_capsule, array_capsule)
+    // Call RecordBatch._import_from_c_capsule(schema_capsule, array_capsule)
     // Note: order is schema first, then array
-    PyObject* import_method = PyObject_GetAttrString(array_class, "_import_from_c_capsule");
+    PyObject* import_method = PyObject_GetAttrString(recordbatch_class, "_import_from_c_capsule");
     if (!import_method) {
-        Py_DECREF(array_class);
+        Py_DECREF(recordbatch_class);
         Py_DECREF(pyarrow_module);
         Py_DECREF(schema_capsule);
         Py_DECREF(array_capsule);
@@ -140,21 +140,21 @@ static PyObject* execute_query(PyObject* self, PyObject* args) {
         return NULL;
     }
 
-    PyObject* arrow_array = PyObject_CallFunctionObjArgs(
-        import_method, 
-        schema_capsule, 
-        array_capsule, 
+    PyObject* arrow_recordbatch = PyObject_CallFunctionObjArgs(
+        import_method,
+        schema_capsule,
+        array_capsule,
         NULL
     );
 
     // Clean up
     Py_DECREF(import_method);
-    Py_DECREF(array_class);
+    Py_DECREF(recordbatch_class);
     Py_DECREF(pyarrow_module);
     Py_DECREF(schema_capsule);
     Py_DECREF(array_capsule);
 
-    return arrow_array;
+    return arrow_recordbatch;
 }
 
 static PyMethodDef ArrowBridgeMethods[] = {

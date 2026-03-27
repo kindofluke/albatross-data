@@ -111,17 +111,13 @@ Executing query: {}", query);
         let batches = df.collect().await?;
 
         if let Some(batch) = batches.into_iter().next() {
-            // Get the underlying data from the RecordBatch
-            let columns = batch.columns();
-            
-            // For simplicity, export the first column as an example
-            // In production, you'd want to export the entire RecordBatch as a StructArray
-            let array_data = if !columns.is_empty() {
-                columns[0].to_data()
-            } else {
-                return Ok(None);
-            };
-            
+            // Convert RecordBatch to StructArray to preserve all columns
+            // StructArray treats each row as a struct containing values from all columns
+            use arrow::array::{Array, StructArray};
+
+            let struct_array = StructArray::from(batch);
+            let array_data = struct_array.to_data();
+
             // Export to FFI using to_ffi
             let (ffi_array, ffi_schema) = ffi::to_ffi(&array_data)?;
 
