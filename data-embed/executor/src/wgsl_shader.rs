@@ -393,3 +393,103 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 }
 "#;
+
+/// Window function: ROW_NUMBER
+///
+/// Assigns a unique, sequential integer to each row.
+/// This shader assumes the data has already been sorted by the `ORDER BY` clause.
+/// It's a simple pass-through that writes the global invocation index + 1.
+/// Prerequisite: The data must be sorted before this shader is run.
+pub const WINDOW_ROW_NUMBER_SHADER: &str = r#"
+@group(0) @binding(0) var<storage, read_write> out_row_numbers: array<u32>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let idx = global_id.y * 65535u * 256u + global_id.x;
+    if (idx >= arrayLength(&out_row_numbers)) {
+        return;
+    }
+    out_row_numbers[idx] = idx + 1u;
+}
+"#;
+
+/// Window functions: RANK and DENSE_RANK
+///
+/// Computes the rank of each row within its partition. This is a multi-pass algorithm
+/// that requires host-side orchestration.
+/// Prerequisite: The data must be sorted by the key upon which ranking is based.
+///
+/// **Pass 1: Peer Group Detection**
+/// A shader identifies the start of each peer group (rows with the same key).
+/// It outputs an array of flags (1 for start, 0 otherwise). The shader below is an
+/// example of this pass.
+///
+/// **Pass 2: DENSE_RANK Calculation**
+/// Run a parallel prefix sum (cumulative sum) on the `group_starts` flags from Pass 1.
+/// The resulting array is the `DENSE_RANK`.
+///
+/// **Pass 3: RANK Calculation**
+/// The `RANK` is the `ROW_NUMBER` at the start of each peer group. A propagation
+/// pass is needed to fill in the rank for other rows in the same peer group.
+pub const WINDOW_RANK_FUNCTIONS_SHADER: &str = r#"
+// This shader implements Pass 1: Peer Group Detection.
+@group(0) @binding(0) var<storage, read> sorted_keys: array<i32>;
+@group(0) @binding(1) var<storage, read_write> group_starts: array<u32>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let idx = global_id.y * 65535u * 256u + global_id.x;
+    if (idx >= arrayLength(&sorted_keys)) {
+        return;
+    }
+    
+    var is_start = 0u;
+    if (idx == 0u) {
+        is_start = 1u;
+    } else {
+        if (sorted_keys[idx] != sorted_keys[idx - 1u]) {
+            is_start = 1u;
+        }
+    }
+    group_starts[idx] = is_start;
+}
+"#;
+
+/// Window functions: SUM() OVER (ORDER BY ...) and COUNT() OVER (ORDER BY ...)
+///
+/// Computes a cumulative sum or count over a sorted dataset.
+/// Prerequisite: The data must be sorted according to the `ORDER BY` clause.
+///
+/// This is achieved using a parallel prefix scan (cumulative sum) algorithm.
+/// A full, high-performance implementation for arbitrary data sizes is complex
+/// and typically requires multiple passes orchestrated by the host:
+///
+/// 1.  **Local Scan**: Each workgroup computes a prefix scan of its local chunk
+///     of the data and writes out the block's total sum to a temporary buffer.
+/// 2.  **Block Scan**: A prefix scan is run on the buffer of block sums from Pass 1.
+/// 3.  **Finalize**: The results from the block scan are added back to the
+///     local scan results to get the final global cumulative sum.
+///
+/// For `COUNT()`, the input would be an array of 1s.
+pub const WINDOW_CUMULATIVE_AGG_SHADER: &str = r#"
+// This is a conceptual placeholder. A full implementation requires multiple shaders
+// for the different passes as described above. The core of each pass would be a
+// parallel scan algorithm, like the Blelloch or Hillis-Steele scan.
+//
+// Example of a single-workgroup inclusive scan (for Pass 1):
+
+@group(0) @binding(0) var<storage, read> in_values: array<f32>;
+@group(0) @binding(1) var<storage, read_write> out_cumulative_values: array<f32>;
+
+var<workgroup> shared_data: array<f32, 256>;
+
+@compute @workgroup_size(256)
+fn main(
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+    // Implementation of a single-workgroup prefix scan would go here.
+    // This is non-trivial to show in a small, correct example.
+    // The host would need to manage multiple dispatches for large datasets.
+}
+"#;

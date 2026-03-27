@@ -2,11 +2,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::PathBuf;
 
-mod executor;
-mod wgsl_shader;
-pub mod wgpu_engine;
-
-use executor::Executor;
+// Use the executor library crate
+use executor::executor::Executor;
 
 #[derive(Parser, Debug)]
 #[command(name = "data-run")]

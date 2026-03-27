@@ -1,6 +1,18 @@
+// Core modules
 pub mod wgsl_shader;
 pub mod wgpu_engine;
 pub mod executor;
+
+// GPU infrastructure modules
+pub mod gpu_types;
+pub mod gpu_buffers;
+pub mod gpu_pipeline;
+pub mod gpu_dispatch;
+
+// GPU operation modules
+pub mod aggregations;
+pub mod joins;
+pub mod window;
 
 use std::ffi::{CStr, c_char};
 use std::sync::OnceLock;
