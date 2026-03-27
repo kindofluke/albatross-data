@@ -34,6 +34,20 @@ extern int32_t execute_query_to_arrow(
     const struct ArrowSchema** schema
 );
 
+// GPU detection functions from Rust
+typedef struct {
+    char* name;
+    char* backend;
+    char* device_type;
+    char* driver;
+    char* driver_info;
+    int32_t available;
+} CGpuInfo;
+
+extern int32_t check_gpu_available(void);
+extern CGpuInfo* get_gpu_information(void);
+extern void free_gpu_info(CGpuInfo* info);
+
 // Destructor for ArrowSchema PyCapsule
 static void release_arrow_schema_capsule(PyObject* capsule) {
     struct ArrowSchema* schema = 
@@ -157,8 +171,105 @@ static PyObject* execute_query(PyObject* self, PyObject* args) {
     return arrow_recordbatch;
 }
 
+static PyObject* check_gpu(PyObject* self, PyObject* args) {
+    int32_t result = check_gpu_available();
+    if (result == 1) {
+        Py_RETURN_TRUE;
+    } else {
+        Py_RETURN_FALSE;
+    }
+}
+
+static PyObject* get_gpu_info(PyObject* self, PyObject* args) {
+    CGpuInfo* info = get_gpu_information();
+
+    if (info == NULL) {
+        Py_RETURN_NONE;
+    }
+
+    // Create Python dictionary with GPU info
+    PyObject* dict = PyDict_New();
+    if (dict == NULL) {
+        free_gpu_info(info);
+        return NULL;
+    }
+
+    // Add name field
+    if (info->name != NULL) {
+        PyObject* name = PyUnicode_FromString(info->name);
+        if (name == NULL) {
+            Py_DECREF(dict);
+            free_gpu_info(info);
+            return NULL;
+        }
+        PyDict_SetItemString(dict, "name", name);
+        Py_DECREF(name);
+    }
+
+    // Add backend field
+    if (info->backend != NULL) {
+        PyObject* backend = PyUnicode_FromString(info->backend);
+        if (backend == NULL) {
+            Py_DECREF(dict);
+            free_gpu_info(info);
+            return NULL;
+        }
+        PyDict_SetItemString(dict, "backend", backend);
+        Py_DECREF(backend);
+    }
+
+    // Add device_type field
+    if (info->device_type != NULL) {
+        PyObject* device_type = PyUnicode_FromString(info->device_type);
+        if (device_type == NULL) {
+            Py_DECREF(dict);
+            free_gpu_info(info);
+            return NULL;
+        }
+        PyDict_SetItemString(dict, "device_type", device_type);
+        Py_DECREF(device_type);
+    }
+
+    // Add driver field
+    if (info->driver != NULL) {
+        PyObject* driver = PyUnicode_FromString(info->driver);
+        if (driver == NULL) {
+            Py_DECREF(dict);
+            free_gpu_info(info);
+            return NULL;
+        }
+        PyDict_SetItemString(dict, "driver", driver);
+        Py_DECREF(driver);
+    }
+
+    // Add driver_info field
+    if (info->driver_info != NULL) {
+        PyObject* driver_info = PyUnicode_FromString(info->driver_info);
+        if (driver_info == NULL) {
+            Py_DECREF(dict);
+            free_gpu_info(info);
+            return NULL;
+        }
+        PyDict_SetItemString(dict, "driver_info", driver_info);
+        Py_DECREF(driver_info);
+    }
+
+    // Add available field
+    PyObject* available = info->available ? Py_True : Py_False;
+    Py_INCREF(available);
+    PyDict_SetItemString(dict, "available", available);
+    Py_DECREF(available);
+
+    // Free the C struct
+    free_gpu_info(info);
+
+    return dict;
+}
+
 static PyMethodDef ArrowBridgeMethods[] = {
     {"execute_query", execute_query, METH_VARARGS, "Execute a SQL query and return a pyarrow.Table"},
+    {"check_gpu", check_gpu, METH_NOARGS, "Check if GPU is available"},
+    {"get_gpu_info", get_gpu_info, METH_NOARGS, "Get detailed GPU information"},
     {NULL, NULL, 0, NULL}
 };
 

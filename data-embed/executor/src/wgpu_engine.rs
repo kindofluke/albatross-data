@@ -12,6 +12,86 @@ use crate::aggregations::AggregationOps;
 use crate::joins::JoinOps;
 use crate::window::WindowOps;
 
+/// Information about the GPU device
+#[derive(Debug, Clone)]
+pub struct GpuInfo {
+    /// Name of the GPU adapter
+    pub name: String,
+    /// GPU backend type (Vulkan, Metal, DX12, etc.)
+    pub backend: String,
+    /// Device type (DiscreteGpu, IntegratedGpu, VirtualGpu, Cpu, Other)
+    pub device_type: String,
+    /// Driver name
+    pub driver: String,
+    /// Driver info/version
+    pub driver_info: String,
+    /// Whether the GPU is available and operational
+    pub available: bool,
+}
+
+/// Check if a GPU is available for computation
+///
+/// This is a lightweight check that attempts to find a suitable GPU adapter
+/// without creating a full device.
+///
+/// # Returns
+/// True if a GPU adapter is available, false otherwise
+pub async fn is_gpu_available() -> bool {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::all(),
+        ..Default::default()
+    });
+
+    instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        })
+        .await
+        .is_some()
+}
+
+/// Get detailed information about available GPU
+///
+/// Queries the system for GPU adapter information including name, backend type,
+/// device type, and driver information. This confirms that the GPU hardware is
+/// present AND that the necessary software stack (Vulkan, Metal, etc.) is working.
+///
+/// # Returns
+/// GpuInfo struct with details about the GPU, or None if no GPU is available
+///
+/// # Device Types
+/// - DiscreteGpu: Dedicated GPU card (e.g., NVIDIA, AMD discrete cards)
+/// - IntegratedGpu: Integrated GPU (e.g., Intel integrated graphics)
+/// - VirtualGpu: Virtual GPU (e.g., in a VM)
+/// - Cpu: Software renderer (should not appear with force_fallback_adapter: false)
+/// - Other: Unknown device type
+pub async fn get_gpu_info() -> Option<GpuInfo> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::all(),
+        ..Default::default()
+    });
+
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,  // Only real GPUs, no software rendering
+        })
+        .await?;
+
+    let info = adapter.get_info();
+    Some(GpuInfo {
+        name: info.name,
+        backend: format!("{:?}", info.backend),
+        device_type: format!("{:?}", info.device_type),
+        driver: info.driver.clone(),
+        driver_info: info.driver_info.clone(),
+        available: true,
+    })
+}
+
 /// Main GPU execution engine
 ///
 /// Provides access to GPU-accelerated operations for data processing.

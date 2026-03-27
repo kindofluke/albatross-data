@@ -14,12 +14,13 @@ pub mod aggregations;
 pub mod joins;
 pub mod window;
 
-use std::ffi::{CStr, c_char};
+use std::ffi::{CStr, CString, c_char};
 use std::sync::OnceLock;
 use std::path::PathBuf;
 use tokio::runtime::Runtime;
 use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 use executor::Executor;
+use wgpu_engine::{is_gpu_available, get_gpu_info};
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
@@ -109,5 +110,118 @@ pub extern "C" fn release_arrow_pointers(
         unsafe {
             let _ = Box::from_raw(schema as *mut FFI_ArrowSchema);
         }
+    }
+}
+
+/// C-compatible struct for GPU information
+#[repr(C)]
+pub struct CGpuInfo {
+    /// Pointer to GPU name string (null-terminated)
+    pub name: *mut c_char,
+    /// Pointer to backend type string (null-terminated)
+    pub backend: *mut c_char,
+    /// Pointer to device type string (null-terminated)
+    pub device_type: *mut c_char,
+    /// Pointer to driver name string (null-terminated)
+    pub driver: *mut c_char,
+    /// Pointer to driver info string (null-terminated)
+    pub driver_info: *mut c_char,
+    /// Whether GPU is available
+    pub available: i32,
+}
+
+/// Check if a GPU is available
+///
+/// Returns 1 if GPU is available, 0 otherwise
+#[no_mangle]
+pub extern "C" fn check_gpu_available() -> i32 {
+    let result = get_runtime().block_on(async {
+        is_gpu_available().await
+    });
+
+    if result { 1 } else { 0 }
+}
+
+/// Get detailed GPU information
+///
+/// Returns a pointer to CGpuInfo struct, or null if no GPU available.
+/// Caller must free the returned pointer using free_gpu_info().
+#[no_mangle]
+pub extern "C" fn get_gpu_information() -> *mut CGpuInfo {
+    let result = get_runtime().block_on(async {
+        get_gpu_info().await
+    });
+
+    match result {
+        Some(info) => {
+            // Convert Rust strings to C strings
+            let name = match CString::new(info.name) {
+                Ok(s) => s.into_raw(),
+                Err(_) => std::ptr::null_mut(),
+            };
+
+            let backend = match CString::new(info.backend) {
+                Ok(s) => s.into_raw(),
+                Err(_) => std::ptr::null_mut(),
+            };
+
+            let device_type = match CString::new(info.device_type) {
+                Ok(s) => s.into_raw(),
+                Err(_) => std::ptr::null_mut(),
+            };
+
+            let driver = match CString::new(info.driver) {
+                Ok(s) => s.into_raw(),
+                Err(_) => std::ptr::null_mut(),
+            };
+
+            let driver_info = match CString::new(info.driver_info) {
+                Ok(s) => s.into_raw(),
+                Err(_) => std::ptr::null_mut(),
+            };
+
+            let c_info = CGpuInfo {
+                name,
+                backend,
+                device_type,
+                driver,
+                driver_info,
+                available: if info.available { 1 } else { 0 },
+            };
+
+            Box::into_raw(Box::new(c_info))
+        }
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// Free GPU information struct
+///
+/// Must be called to free memory allocated by get_gpu_information()
+#[no_mangle]
+pub extern "C" fn free_gpu_info(info: *mut CGpuInfo) {
+    if info.is_null() {
+        return;
+    }
+
+    unsafe {
+        // Retake ownership and free strings
+        let info_box = Box::from_raw(info);
+        if !info_box.name.is_null() {
+            let _ = CString::from_raw(info_box.name);
+        }
+        if !info_box.backend.is_null() {
+            let _ = CString::from_raw(info_box.backend);
+        }
+        if !info_box.device_type.is_null() {
+            let _ = CString::from_raw(info_box.device_type);
+        }
+        if !info_box.driver.is_null() {
+            let _ = CString::from_raw(info_box.driver);
+        }
+        if !info_box.driver_info.is_null() {
+            let _ = CString::from_raw(info_box.driver_info);
+        }
+        // info_box is dropped here, freeing the struct
     }
 }
