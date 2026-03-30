@@ -129,18 +129,41 @@ impl Executor {
         let gpu_result = wgpu_engine::run_sum_aggregation(data_to_process.clone()).await?;
         let execution_time_ms = exec_start.elapsed().as_millis();
 
-        // 7. Format results
-        let stdout = format!("[GPU Result] SUM = {}", gpu_result);
-        let total_time_ms = total_start.elapsed().as_millis();
+        // 7. Convert GPU result to Arrow RecordBatch
+        use arrow::array::{Array, Float64Array, StructArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        use arrow::record_batch::RecordBatch;
+
+        // Create a schema with a single column for the result
+        let schema = Schema::new(vec![Field::new("sum", DataType::Float64, false)]);
+
+        // Create an array with the single GPU result value
+        let result_array = Float64Array::from(vec![gpu_result]);
+
+        // Create a RecordBatch with one row
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![Arc::new(result_array) as Arc<dyn Array>],
+        )?;
 
         if self.verbose {
-            println!("{}", stdout);
+            println!("[GPU Result] SUM = {}", gpu_result);
             println!("Execution time: {}ms", execution_time_ms);
             println!("Total time: {}ms", total_time_ms);
         }
 
-        // TODO: This is a placeholder. We need to convert the GPU result to an Arrow array.
-        Ok(None)
+        // 8. Convert RecordBatch to FFI format (same as CPU version)
+        let struct_array = StructArray::from(batch);
+        let array_data = struct_array.to_data();
+
+        // Export to FFI using to_ffi
+        let (ffi_array, ffi_schema) = ffi::to_ffi(&array_data)?;
+
+        let array_ptr = Box::into_raw(Box::new(ffi_array)) as *const FFI_ArrowArray;
+        let schema_ptr = Box::into_raw(Box::new(ffi_schema)) as *const FFI_ArrowSchema;
+
+        Ok(Some((array_ptr, schema_ptr)))
     }
 
     pub async fn execute(

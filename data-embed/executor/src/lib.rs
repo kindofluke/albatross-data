@@ -129,14 +129,14 @@ pub extern "C" fn execute_query_gpu(
             Err(_) => return -1,
         }
     };
-    
+
     let data_path_str = unsafe {
         match CStr::from_ptr(data_path).to_str() {
             Ok(s) => s,
             Err(_) => return -1,
         }
     };
-    
+
     // Find parquet files in data_path
     let parquet_files: Vec<PathBuf> = match std::fs::read_dir(data_path_str) {
         Ok(entries) => entries
@@ -146,11 +146,11 @@ pub extern "C" fn execute_query_gpu(
             .collect(),
         Err(_) => return -2,
     };
-    
+
     if parquet_files.is_empty() {
         return -3;
     }
-    
+
     // Generate table names from file stems
     let table_names: Vec<String> = parquet_files
         .iter()
@@ -161,11 +161,11 @@ pub extern "C" fn execute_query_gpu(
                 .to_string()
         })
         .collect();
-    
+
     // Execute query using async runtime
     let result = get_runtime().block_on(async {
         let executor = Executor::new(false);
-        executor.execute_to_arrow(&parquet_files, &table_names, query_str).await
+        executor.execute_to_arrow_gpu(&parquet_files, &table_names, query_str).await
     });
     
     match result {
