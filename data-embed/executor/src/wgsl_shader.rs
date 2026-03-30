@@ -496,20 +496,32 @@ fn main(
 
 pub const SUM_SHADER: &str = r#"
 @group(0) @binding(0)
-var<storage, read> input: array<f64>;
+var<storage, read> input: array<f32>;
 
 @group(0) @binding(1)
-var<storage, read_write> output: atomic<u64>;
+var<storage, read_write> output: atomic<u32>;
 
 @compute
 @workgroup_size(256)
-fn main(@global_invocation_id(x) global_id: u32) {
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let index = global_id.x;
-    if index >= arrayLength(&input)) {
+    if (index >= arrayLength(&input)) {
         return;
     }
 
     let value = input[index];
-    atomicAdd(&output, u64(value));
+    let value_bits = bitcast<u32>(value);
+
+    // Atomic floating-point addition using compare-and-swap
+    loop {
+        let old_bits = atomicLoad(&output);
+        let old_value = bitcast<f32>(old_bits);
+        let new_value = old_value + value;
+        let new_bits = bitcast<u32>(new_value);
+        let exchanged = atomicCompareExchangeWeak(&output, old_bits, new_bits);
+        if (exchanged.exchanged) {
+            break;
+        }
+    }
 }
 "#;
