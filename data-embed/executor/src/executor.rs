@@ -140,15 +140,25 @@ impl Executor {
         let df = ctx.sql(query).await?;
         let physical_plan = df.create_physical_plan().await?;
 
-        // 3. Check if this is a join query by looking for "JOIN" in the query
-        let is_join_query = query.to_uppercase().contains("JOIN");
+        // 3. Detect query type to route to appropriate execution path
+        let query_upper = query.to_uppercase();
+        let is_join_query = query_upper.contains("JOIN");
+        let is_aggregation = query_upper.contains("SUM")
+            || query_upper.contains("COUNT")
+            || query_upper.contains("AVG")
+            || query_upper.contains("MIN")
+            || query_upper.contains("MAX")
+            || query_upper.contains("GROUP BY");
 
         if is_join_query {
-            // Execute join on GPU
+            // Execute join on GPU (currently uses CPU fallback)
             self.execute_join_gpu(&ctx, physical_plan, total_start).await
-        } else {
-            // Execute simple aggregation on GPU
+        } else if is_aggregation {
+            // Execute aggregation on GPU
             self.execute_simple_agg_gpu(&ctx, physical_plan, total_start).await
+        } else {
+            // Execute table scan on CPU (for SELECT * and similar queries)
+            self.execute_table_scan_cpu(&ctx, physical_plan, total_start).await
         }
     }
 
@@ -270,6 +280,53 @@ impl Executor {
 
         if self.verbose {
             println!("Total time: {}ms", total_time_ms);
+        }
+
+        // Convert the first batch to FFI format
+        let struct_array = StructArray::from(first_batch.clone());
+        let array_data = struct_array.to_data();
+
+        let (ffi_array, ffi_schema) = ffi::to_ffi(&array_data)?;
+
+        let array_ptr = Box::into_raw(Box::new(ffi_array)) as *const FFI_ArrowArray;
+        let schema_ptr = Box::into_raw(Box::new(ffi_schema)) as *const FFI_ArrowSchema;
+
+        Ok(Some((array_ptr, schema_ptr)))
+    }
+
+    async fn execute_table_scan_cpu(
+        &self,
+        ctx: &SessionContext,
+        physical_plan: Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+        total_start: Instant,
+    ) -> Result<Option<(*const ffi::FFI_ArrowArray, *const ffi::FFI_ArrowSchema)>> {
+        use arrow::array::{Array, StructArray};
+
+        if self.verbose {
+            println!("Executing table scan on CPU (SELECT * or similar query)");
+        }
+
+        // Execute the query using DataFusion on CPU
+        let exec_start = Instant::now();
+        let batches: Vec<arrow::record_batch::RecordBatch> =
+            datafusion::physical_plan::collect(physical_plan, ctx.task_ctx()).await?;
+        let execution_time_ms = exec_start.elapsed().as_millis();
+
+        if batches.is_empty() {
+            if self.verbose {
+                println!("Query returned no results");
+            }
+            return Ok(None);
+        }
+
+        let first_batch = &batches[0];
+        let schema = first_batch.schema();
+
+        if self.verbose {
+            println!("Table scan completed - {} rows returned", first_batch.num_rows());
+            println!("Schema: {} columns", schema.fields().len());
+            println!("Execution time: {}ms", execution_time_ms);
+            println!("Total time: {}ms", total_start.elapsed().as_millis());
         }
 
         // Convert the first batch to FFI format
