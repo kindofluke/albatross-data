@@ -1,10 +1,12 @@
-# AGENT.md - Implementation Guide
+# AGENT.md - Developer Implementation Guide
+
+> **Quick Start**: New to the project? Read [README.md](./README.md) first for setup instructions, then return here for implementation details.
 
 ## Project Status: Phase 2A Complete ✅
 
 **Goal**: GPU-accelerated composable data pipeline bypassing traditional databases.
 
-**Current State**: DataFusion frontend working. Converts SQL → Substrait protobuf plans.
+**Current State**: DataFusion frontend working. Converts SQL → Substrait protobuf plans. FFI integration complete between Rust and Python.
 
 ## What's Been Built
 
@@ -105,10 +107,12 @@ This means:
 
 ## What Works Right Now
 
+### Rust SQL Execution
+
 ```bash
 cd data-embed
 
-# Generate test data (already done)
+# Generate test data (run once)
 cargo run --release --bin generate-test-data
 
 # Execute query and see results
@@ -134,6 +138,32 @@ cargo run -p executor -- \
   -q "SELECT COUNT(*) FROM orders" \
   --substrait \
   -o output/my_query.pb
+```
+
+### Python Kernel with FFI
+
+```bash
+cd data-kernel
+
+# Set up environment (first time only - uses uv for fast dependency resolution)
+uv sync
+source .venv/bin/activate
+
+# Set data path
+export DATA_PATH=../data-embed/data
+
+# Test FFI integration
+python test_integration.py
+
+# Use in Python directly
+python -c "
+from data_kernel import arrow_bridge
+result = arrow_bridge.execute_query('SELECT COUNT(*) FROM orders')
+print(f'Count: {result[0]}')
+"
+
+# Start Jupyter with the data kernel
+jupyter notebook
 ```
 
 **Supported SQL**:
@@ -230,11 +260,25 @@ albatross-data/
 - `clap` 4.5 - CLI parsing
 - `prost` 0.13 - Protobuf encoding
 
+**Installation**: `cargo build --release` (handled by rustup/cargo)
+
+### Python (data-kernel/)
+- `ipykernel` - Jupyter kernel protocol
+- `pandas` - DataFrame manipulation
+- `pyarrow` - Arrow format bindings
+- `jupyter-mimetypes` - MIME type support
+
+**Installation**: `uv sync` (fast, reliable dependency resolution)
+
+> **Important**: This project uses `uv` instead of traditional pip/virtualenv. Run `uv sync` to install dependencies and set up the virtual environment automatically.
+
 ### C++ (lib/sirius/)
 - CUDA Toolkit - GPU programming
 - cuDF - GPU DataFrame library
 - RMM - RAPIDS Memory Manager
 - DuckDB - (Sirius is a DuckDB extension)
+
+**Installation**: See `lib/sirius/CLAUDE.md` for build instructions
 
 ## Known Limitations
 
@@ -320,10 +364,53 @@ albatross-data/
 
 ## Summary
 
-**Phase 2A Complete**: DataFusion frontend working. SQL queries successfully convert to Substrait protobuf plans.
+**Phase 2A Complete**:
+- ✅ DataFusion frontend working
+- ✅ SQL queries convert to Substrait protobuf plans
+- ✅ FFI bridge functional (Rust ↔ Python)
+- ✅ Python Jupyter kernel operational
+- ✅ Arrow data transfers working
 
 **Next Milestone**: Sirius integration on CUDA hardware. Pass `.pb` files to GPU, execute, return results.
 
 **Blocker**: Need NVIDIA GPU access (Mac has Metal, not CUDA).
 
-**Ready to Continue**: All code is in place for frontend. Next session should focus on Sirius build and FFI bridge.
+**Ready to Continue**: Frontend and FFI bridge complete. Next session should focus on Sirius GPU engine deployment and integration.
+
+## Getting Help
+
+1. **Setup Issues**: See [README.md](./README.md) troubleshooting section
+2. **Build Errors**: Check that `uv sync` completed successfully for Python, `cargo build --release` for Rust
+3. **FFI Issues**: See [INTEGRATION_COMPLETE.md](./INTEGRATION_COMPLETE.md) for detailed FFI bridge documentation
+4. **Architecture Questions**: See the diagrams in this file and README.md
+
+## Developer Onboarding Checklist
+
+Use this checklist to verify your development environment is set up correctly:
+
+### Prerequisites
+- [ ] Rust installed (check: `rustc --version`)
+- [ ] Python 3.10+ installed (check: `python --version`)
+- [ ] uv installed (check: `uv --version`)
+- [ ] Git repository cloned
+
+### First Build
+- [ ] `cd data-embed && cargo build --release` completes successfully
+- [ ] Test data generated: `cargo run --release --bin generate-test-data`
+- [ ] Sample query works: `cargo run -p executor -- -f data/orders.parquet -q "SELECT COUNT(*) FROM orders"`
+- [ ] `cd ../data-kernel && uv sync` completes successfully
+- [ ] `source .venv/bin/activate` activates virtual environment
+- [ ] Full build works: `cd .. && make build`
+
+### Verify Components
+- [ ] Rust executor runs queries: `data-embed/target/release/data-run --help`
+- [ ] Python FFI bridge works: `cd data-kernel && python test_integration.py`
+- [ ] Environment variable set: `export DATA_PATH=$(pwd)/data-embed/data`
+
+### Ready to Develop
+- [ ] Can run Rust tests: `cd data-embed && cargo test`
+- [ ] Can modify and rebuild: edit code, run `make build`
+- [ ] Understand project structure (see README.md)
+- [ ] Read through example queries in this file
+
+**If all boxes are checked**, you're ready to start developing! If not, see the troubleshooting section in README.md.
