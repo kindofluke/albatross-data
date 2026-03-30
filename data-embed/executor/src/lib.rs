@@ -37,6 +37,91 @@ pub extern "C" fn execute_query_to_arrow(
     array_out: *mut *const FFI_ArrowArray,
     schema_out: *mut *const FFI_ArrowSchema,
 ) -> i32 {
+    let gpu_available = get_runtime().block_on(async {
+        is_gpu_available().await
+    });
+
+    if gpu_available {
+        execute_query_gpu(query, data_path, array_out, schema_out)
+    } else {
+        execute_query_cpu(query, data_path, array_out, schema_out)
+    }
+}
+
+
+#[no_mangle]
+pub extern "C" fn execute_query_cpu(
+    query: *const c_char,
+    data_path: *const c_char,
+    array_out: *mut *const FFI_ArrowArray,
+    schema_out: *mut *const FFI_ArrowSchema,
+) -> i32 {
+    // Safety: caller must ensure query and data_path are valid C strings
+    let query_str = unsafe {
+        match CStr::from_ptr(query).to_str() {
+            Ok(s) => s,
+            Err(_) => return -1,
+        }
+    };
+    
+    let data_path_str = unsafe {
+        match CStr::from_ptr(data_path).to_str() {
+            Ok(s) => s,
+            Err(_) => return -1,
+        }
+    };
+    
+    // Find parquet files in data_path
+    let parquet_files: Vec<PathBuf> = match std::fs::read_dir(data_path_str) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("parquet"))
+            .collect(),
+        Err(_) => return -2,
+    };
+    
+    if parquet_files.is_empty() {
+        return -3;
+    }
+    
+    // Generate table names from file stems
+    let table_names: Vec<String> = parquet_files
+        .iter()
+        .map(|f| {
+            f.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("table")
+                .to_string()
+        })
+        .collect();
+    
+    // Execute query using async runtime
+    let result = get_runtime().block_on(async {
+        let executor = Executor::new(false);
+        executor.execute_to_arrow(&parquet_files, &table_names, query_str).await
+    });
+    
+    match result {
+        Ok(Some((array_ptr, schema_ptr))) => {
+            unsafe {
+                *array_out = array_ptr;
+                *schema_out = schema_ptr;
+            }
+            0
+        }
+        Ok(None) => -4, // Empty result
+        Err(_) => -5,   // Execution error
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn execute_query_gpu(
+    query: *const c_char,
+    data_path: *const c_char,
+    array_out: *mut *const FFI_ArrowArray,
+    schema_out: *mut *const FFI_ArrowSchema,
+) -> i32 {
     // Safety: caller must ensure query and data_path are valid C strings
     let query_str = unsafe {
         match CStr::from_ptr(query).to_str() {

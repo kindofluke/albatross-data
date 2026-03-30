@@ -493,3 +493,23 @@ fn main(
     // The host would need to manage multiple dispatches for large datasets.
 }
 "#;
+
+pub const SUM_SHADER: &str = r#"
+@group(0) @binding(0)
+var<storage, read> input: array<f64>;
+
+@group(0) @binding(1)
+var<storage, read_write> output: atomic<u64>;
+
+@compute
+@workgroup_size(256)
+fn main(@global_invocation_id(x) global_id: u32) {
+    let index = global_id.x;
+    if index >= arrayLength(&input)) {
+        return;
+    }
+
+    let value = input[index];
+    atomicAdd(&output, u64(value));
+}
+"#;

@@ -48,6 +48,10 @@ struct Args {
     /// Output results in CSV format instead of pretty table
     #[arg(long)]
     csv: bool,
+
+    /// Enable GPU execution (experimental)
+    #[arg(long)]
+    gpu: bool,
 }
 
 #[tokio::main]
@@ -138,10 +142,17 @@ async fn main() -> Result<()> {
     }
 
     // Execute query
-    let result = executor
-        .execute(&args.files, &table_names, &args.query, args.csv)
-        .await
-        .context("Failed to execute query")?;
+    let result = if args.gpu {
+        executor
+            .execute_gpu(&args.files, &table_names, &args.query)
+            .await
+            .context("Failed to execute query on GPU")?
+    } else {
+        executor
+            .execute(&args.files, &table_names, &args.query, args.csv)
+            .await
+            .context("Failed to execute query on CPU")?
+    };
 
     // Print results
     println!("{}", result.stdout);

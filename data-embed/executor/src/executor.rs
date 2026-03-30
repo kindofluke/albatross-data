@@ -7,6 +7,8 @@ use prost::Message;
 use arrow::csv::Writer;
 use arrow::ffi::{self, FFI_ArrowArray, FFI_ArrowSchema};
 
+use crate::wgpu_engine;
+
 pub struct ExecutionResult {
     pub stdout: String,
     pub execution_time_ms: u128,
@@ -20,6 +22,125 @@ pub struct Executor {
 impl Executor {
     pub fn new(verbose: bool) -> Self {
         Self { verbose }
+    }
+
+    pub async fn execute_gpu(
+        &self,
+        parquet_files: &[PathBuf],
+        table_names: &[String],
+        query: &str,
+    ) -> Result<ExecutionResult> {
+        let total_start = Instant::now();
+
+        if self.verbose {
+            println!("Executing on GPU...");
+        }
+
+        // 1. Create DataFusion context and register tables
+        let ctx = SessionContext::new();
+        for (table_name, path) in table_names.iter().zip(parquet_files.iter()) {
+            ctx.register_parquet(
+                table_name,
+                path.to_str().unwrap(),
+                ParquetReadOptions::default(),
+            )
+            .await?;
+        }
+
+        // 2. Get the physical plan
+        let df = ctx.sql(query).await?;
+        let physical_plan = df.create_physical_plan().await?;
+
+        // 3. (Placeholder) Check if the plan is a simple aggregation
+        // In a real implementation, this would be a visitor traversing the plan
+        let is_simple_agg = physical_plan.schema().fields().len() == 1;
+
+        if !is_simple_agg {
+            anyhow::bail!("GPU execution only supports simple aggregations for now.");
+        }
+
+        // 4. Collect the input data
+        let batches: Vec<arrow::record_batch::RecordBatch> = datafusion::physical_plan::collect(physical_plan, ctx.task_ctx()).await?;
+        let input_batch = batches.into_iter().next().unwrap();
+
+        // 5. (Placeholder) Extract the first column to send to GPU
+        let data_to_process = input_batch.column(0);
+
+        // 6. Offload to GPU
+        let exec_start = Instant::now();
+        let gpu_result = wgpu_engine::run_sum_aggregation(data_to_process.clone()).await?;
+        let execution_time_ms = exec_start.elapsed().as_millis();
+
+        // 7. Format results
+        let stdout = format!("[GPU Result] SUM = {}", gpu_result);
+        let total_time_ms = total_start.elapsed().as_millis();
+
+        Ok(ExecutionResult {
+            stdout,
+            execution_time_ms,
+            total_time_ms,
+        })
+    }
+
+    pub async fn execute_to_arrow_gpu(
+        &self,
+        parquet_files: &[PathBuf],
+        table_names: &[String],
+        query: &str,
+    ) -> Result<Option<(*const ffi::FFI_ArrowArray, *const ffi::FFI_ArrowSchema)>> {
+        let total_start = Instant::now();
+
+        if self.verbose {
+            println!("Executing on GPU...");
+        }
+
+        // 1. Create DataFusion context and register tables
+        let ctx = SessionContext::new();
+        for (table_name, path) in table_names.iter().zip(parquet_files.iter()) {
+            ctx.register_parquet(
+                table_name,
+                path.to_str().unwrap(),
+                ParquetReadOptions::default(),
+            )
+            .await?;
+        }
+
+        // 2. Get the physical plan
+        let df = ctx.sql(query).await?;
+        let physical_plan = df.create_physical_plan().await?;
+
+        // 3. (Placeholder) Check if the plan is a simple aggregation
+        // In a real implementation, this would be a visitor traversing the plan
+        let is_simple_agg = physical_plan.schema().fields().len() == 1;
+
+        if !is_simple_agg {
+            anyhow::bail!("GPU execution only supports simple aggregations for now.");
+        }
+
+        // 4. Collect the input data
+        let batches: Vec<arrow::record_batch::RecordBatch> = datafusion::physical_plan::collect(physical_plan, ctx.task_ctx()).await?;
+        let input_batch = batches.into_iter().next().unwrap();
+
+        // 5. (Placeholder) Extract the first column to send to GPU
+        let data_to_process = input_batch.column(0);
+
+        // 6. Offload to GPU
+        let exec_start = Instant::now();
+        let gpu_result = wgpu_engine::run_sum_aggregation(data_to_process.clone()).await?;
+        let execution_time_ms = exec_start.elapsed().as_millis();
+
+        // 7. Format results
+        let stdout = format!("[GPU Result] SUM = {}", gpu_result);
+        let total_time_ms = total_start.elapsed().as_millis();
+
+        if self.verbose {
+            println!("{}", stdout);
+            println!("Execution time: {}ms", execution_time_ms);
+            println!("Total time: {}ms", total_time_ms);
+        }
+
+        // TODO: This is a placeholder. We need to convert the GPU result to an Arrow array.
+        Ok(None)
     }
 
     pub async fn execute(
