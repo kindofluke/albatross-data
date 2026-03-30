@@ -147,6 +147,8 @@ impl Executor {
             vec![Arc::new(result_array) as Arc<dyn Array>],
         )?;
 
+        let total_time_ms = total_start.elapsed().as_millis();
+
         if self.verbose {
             println!("[GPU Result] SUM = {}", gpu_result);
             println!("Execution time: {}ms", execution_time_ms);
