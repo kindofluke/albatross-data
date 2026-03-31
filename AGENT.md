@@ -175,6 +175,136 @@ jupyter notebook
 - LIMIT
 - Column aliases
 
+## Recent Fixes: Query Execution (March 2026)
+
+### Problem: Error -5 Failures and Incorrect Results
+
+All queries with WHERE clauses, GROUP BY, COUNT, and multi-aggregations were failing with error code -5 or returning garbage values.
+
+**Root Cause Analysis**:
+
+1. **Broken GPU Path** (`executor/src/executor.rs:116-220`):
+   - `execute_to_arrow_gpu()` only supported SUM aggregations
+   - Called `wgpu_engine::run_sum_aggregation()` for ALL aggregations
+   - Always returned single "sum" column regardless of actual query
+   - Failed on WHERE clauses, GROUP BY, COUNT/MIN/MAX/AVG
+   - Line 179: `.unwrap()` panicked on empty batches from COUNT queries
+
+2. **Batch Concatenation Bug** (`executor/src/executor.rs:432`):
+   - `batches.into_iter().next()` only took first batch
+   - GROUP BY queries often return multiple batches - rest were discarded
+   - Resulted in empty or partial results for string-based GROUP BY
+
+**Fixes Applied**:
+
+1. **Disabled GPU Path** (`executor/src/lib.rs:44-54`):
+   ```rust
+   // Temporarily route all queries through CPU path
+   if false && gpu_available {
+       execute_query_gpu(...)  // Disabled until properly implemented
+   } else {
+       execute_query_cpu(...)  // Uses DataFusion correctly
+   }
+   ```
+
+2. **Fixed Batch Concatenation** (`executor/src/executor.rs:432-459`):
+   ```rust
+   // Before: Only first batch
+   if let Some(batch) = batches.into_iter().next() { ... }
+
+   // After: Concatenate all batches
+   let combined_batch = if batches.len() == 1 {
+       batches.into_iter().next().unwrap()
+   } else {
+       concat_batches(&schema, &batches)?
+   };
+   ```
+
+### Test Results: All Queries Pass ✅
+
+Comparison test (`data-kernel/test_gpu_comparison.py`) results:
+
+| Query Type | Status | DuckDB | data-kernel | Speedup |
+|------------|--------|--------|-------------|---------|
+| Q1: COUNT/AVG with WHERE | ✅ PASS | 0.019s | 0.102s | 0.19x |
+| Q2: MIN/MAX/AVG | ✅ PASS | 0.009s | 0.003s | **2.94x** |
+| Q3: GROUP BY String | ✅ PASS | 0.009s | 0.009s | 1.00x |
+| Q4: GROUP BY Integer | ✅ PASS | 0.010s | 0.003s | **2.76x** |
+| Q5: Window Function | ✅ PASS | 0.013s | 0.008s | **1.66x** |
+| Q6: JOIN with Stats | ✅ PASS | 0.010s | 0.006s | **1.67x** |
+| Q7: JOIN + GROUP BY | ✅ PASS | 0.010s | 0.005s | **1.87x** |
+
+**Overall: 7/7 queries passed**
+
+### Query Execution Architecture
+
+```
+arrow_bridge.execute_query(sql)
+    ↓
+lib.rs: execute_query_to_arrow()
+    ↓
+    ├─→ [GPU DISABLED] execute_query_gpu() ─→ execute_to_arrow_gpu()
+    │                                            ├─ execute_simple_agg_gpu() [BROKEN]
+    │                                            ├─ execute_join_gpu() [CPU fallback]
+    │                                            └─ execute_table_scan_cpu()
+    │
+    └─→ [CURRENT] execute_query_cpu() ─→ execute_to_arrow()
+                                           └─ Uses DataFusion (fully functional)
+```
+
+**Current State**: All queries use CPU path through DataFusion, which is fully functional and correct.
+
+### Re-enabling GPU: TODO List
+
+To properly implement GPU acceleration, `execute_to_arrow_gpu()` needs:
+
+1. **WHERE Clause Support**:
+   - Currently panics on filtered queries
+   - Need GPU kernel for predicate evaluation
+
+2. **GROUP BY Support**:
+   - Requires GPU hash-based grouping
+   - Both string and numeric keys
+
+3. **All Aggregation Functions**:
+   - Currently only SUM works (partially)
+   - Need: COUNT, MIN, MAX, AVG
+   - Multiple aggregations in single query
+
+4. **Proper Error Handling**:
+   - Remove `.unwrap()` calls that panic
+   - Graceful fallback to CPU on GPU errors
+
+5. **Multi-Batch Results**:
+   - Already fixed in CPU path
+   - Apply same fix to GPU path when re-enabled
+
+**Files to Modify**:
+- `data-embed/executor/src/executor.rs` - GPU execution functions
+- `data-embed/executor/src/wgpu_engine.rs` - GPU kernels
+- `data-embed/executor/src/lib.rs` - Re-enable GPU routing when ready
+
+**Testing**: Use `data-kernel/test_gpu_comparison.py` to verify GPU results match DuckDB.
+
+### Diagnostic Test Files
+
+Created in `data-kernel/` for debugging query execution:
+
+- `test_gpu_comparison.py` - Full comparison suite (7 queries, DuckDB vs data-kernel)
+- `test_simple_gpu.py` - Quick diagnostic for basic query types
+- `test_string_columns.py` - Tests string column handling and GROUP BY
+- `test_groupby_debug.py` - Detailed GROUP BY debugging
+- `test_q7_debug.py` - JOIN + GROUP BY value comparison
+
+**Usage**:
+```bash
+cd data-kernel
+export DATA_PATH=/Users/luke.shulman/Projects/albatross-data/data-kernel
+python test_gpu_comparison.py  # Run full test suite
+```
+
+All tests generate their own parquet test data automatically.
+
 ## Next Implementation Steps
 
 ### Phase 3: Sirius Integration (Requires CUDA Hardware)

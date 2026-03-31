@@ -429,24 +429,34 @@ Executing query: {}", query);
         let df = ctx.sql(query).await?;
         let batches = df.collect().await?;
 
-        if let Some(batch) = batches.into_iter().next() {
-            // Convert RecordBatch to StructArray to preserve all columns
-            // StructArray treats each row as a struct containing values from all columns
-            use arrow::array::{Array, StructArray};
-
-            let struct_array = StructArray::from(batch);
-            let array_data = struct_array.to_data();
-
-            // Export to FFI using to_ffi
-            let (ffi_array, ffi_schema) = ffi::to_ffi(&array_data)?;
-
-            let array_ptr = Box::into_raw(Box::new(ffi_array)) as *const FFI_ArrowArray;
-            let schema_ptr = Box::into_raw(Box::new(ffi_schema)) as *const FFI_ArrowSchema;
-
-            Ok(Some((array_ptr, schema_ptr)))
-        } else {
-            Ok(None)
+        if batches.is_empty() {
+            return Ok(None);
         }
+
+        // Concatenate all batches into a single batch
+        use arrow::array::{Array, StructArray};
+        use arrow::compute::concat_batches;
+
+        let schema = batches[0].schema();
+        let combined_batch = if batches.len() == 1 {
+            batches.into_iter().next().unwrap()
+        } else {
+            // Concatenate multiple batches
+            concat_batches(&schema, &batches)?
+        };
+
+        // Convert RecordBatch to StructArray to preserve all columns
+        // StructArray treats each row as a struct containing values from all columns
+        let struct_array = StructArray::from(combined_batch);
+        let array_data = struct_array.to_data();
+
+        // Export to FFI using to_ffi
+        let (ffi_array, ffi_schema) = ffi::to_ffi(&array_data)?;
+
+        let array_ptr = Box::into_raw(Box::new(ffi_array)) as *const FFI_ArrowArray;
+        let schema_ptr = Box::into_raw(Box::new(ffi_schema)) as *const FFI_ArrowSchema;
+
+        Ok(Some((array_ptr, schema_ptr)))
     }
 
     pub async fn explain(
