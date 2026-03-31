@@ -1,68 +1,64 @@
-# Benchmark Results: CPU vs GPU Performance
+# Benchmark Results: DuckDB CPU vs data_kernel GPU
 
-## Test Environment
-- **GPU**: NVIDIA Tesla T4 (16GB VRAM, Compute Capability 7.5)
-- **CPU**: AMD EPYC (details from system)
-- **DuckDB**: v1.4.4 with Sirius extension
-- **Date**: $(date)
+**Date**: 2026-03-31 15:12:59
+**Hardware**:
+- **CPU**: arm
+- **GPU**: Apple M1 Pro (Metal backend, IntegratedGpu)
+- **DuckDB**: 1.5.1
+- **data_kernel**: Available
 
-## Queries Tested
+## Datasets
+- **orders_5m.parquet**: 5M rows (89.2MB)
+- **order_items_5m.parquet**: ~27.5M rows (619.1MB)
 
-### Query 1: Simple Aggregations
-```sql
-SELECT COUNT(*), SUM(amount), AVG(amount) FROM table_name
-```
+## Queries
 
-### Query 2: GROUP BY with Aggregations
-```sql
-SELECT status, COUNT(*), SUM(amount) 
-FROM table_name 
-GROUP BY status 
-ORDER BY COUNT(*) DESC
-```
+### Orders Table
+1. **Q1 - Aggregations**: `SELECT COUNT(*), SUM(amount), AVG(amount), MIN(amount), MAX(amount) FROM orders`
+2. **Q2 - GROUP BY**: `SELECT status, COUNT(*) as cnt, SUM(amount) as total FROM orders GROUP BY status ORDER BY cnt DESC`
+3. **Q3 - Filter**: `SELECT * FROM orders WHERE amount > 500 AND quantity > 5 LIMIT 1000`
+4. **Q4 - Complex**: `SELECT status, AVG(amount), SUM(quantity) FROM orders WHERE amount > 100 GROUP BY status`
 
-### Query 3: WHERE Filter with LIMIT
-```sql
-SELECT * FROM table_name WHERE amount > 500 LIMIT 100
-```
+### Order Items Table
+5. **Q5 - Aggregations**: `SELECT COUNT(*), SUM(price * quantity), AVG(price) FROM order_items`
+6. **Q6 - Top Products**: `SELECT product_id, COUNT(*) as cnt, SUM(quantity) as qty FROM order_items GROUP BY product_id ORDER BY cnt DESC LIMIT 20`
+7. **Q7 - Filter**: `SELECT * FROM order_items WHERE price > 100 AND quantity > 5 LIMIT 1000`
+8. **Q8 - Revenue**: `SELECT product_id, SUM(price * quantity) as revenue FROM order_items GROUP BY product_id ORDER BY revenue DESC LIMIT 20`
+
+### JOIN Queries
+9. **Q9 - JOIN with GROUP BY**: `SELECT o.customer_id, COUNT(*) as order_count, SUM(oi.price * oi.quantity) as total_revenue FROM orders o JOIN order_items oi ON o.id = oi.order_id GROUP BY o.customer_id ORDER BY total_revenue DESC LIMIT 20`
+10. **Q10 - JOIN with Aggregations**: `SELECT o.status, COUNT(DISTINCT o.id) as order_count, SUM(oi.quantity) as total_items, AVG(oi.price) as avg_price FROM orders o JOIN order_items oi ON o.id = oi.order_id GROUP BY o.status`
+
+### Window Function Queries
+11. **Q11 - Window Rank**: `SELECT customer_id, id, amount, RANK() OVER (PARTITION BY customer_id ORDER BY amount DESC) as rank FROM orders`
+12. **Q12 - Window Row Number**: `SELECT product_id, order_id, price, ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY price DESC) as row_num FROM order_items`
 
 ## Results
 
-| Dataset | Rows | Query | CPU Time (ms) | GPU Time (ms) | Speedup | Notes |
-|---------|------|-------|---------------|---------------|---------|-------|
-| orders | 10K | Q1 | 3199 | N/A | N/A | GPU blocked by config |
-| orders | 10K | Q2 | 3243 | N/A | N/A | GPU blocked by config |
-| orders | 10K | Q3 | 3220 | N/A | N/A | GPU blocked by config |
-| orders_1m | 1M | Q1 | 3313 | N/A | N/A | GPU blocked by config |
-| orders_1m | 1M | Q2 | 3293 | N/A | N/A | GPU blocked by config |
-| orders_1m | 1M | Q3 | 3287 | N/A | N/A | GPU blocked by config |
-| orders_10m | 10M | Q1 | 3983 | N/A | N/A | GPU blocked by config |
-| orders_10m | 10M | Q2 | 4094 | N/A | N/A | GPU blocked by config |
-| orders_10m | 10M | Q3 | 4050 | N/A | N/A | GPU blocked by config |
+| Query | Dataset | Rows | CPU Time (ms) | GPU Time (ms) | Speedup | Notes |
+|-------|---------|------|---------------|---------------|---------|-------|
+| Q1 | orders | 5M | 32.31 | 121.23 | 0.27x | CPU faster |
+| Q2 | orders | 5M | 15.62 | 42.28 | 0.37x | CPU faster |
+| Q3 | orders | 5M | 4.12 | 42.89 | 0.10x | CPU faster |
+| Q4 | orders | 5M | 25.16 | 50.93 | 0.49x | CPU faster |
+| Q5 | order_items | 27.5M | 122.19 | 46.78 | 2.61x | GPU faster |
+| Q6 | order_items | 27.5M | 78.13 | 89.92 | 0.87x | CPU faster |
+| Q7 | order_items | 27.5M | 3.73 | 94.17 | 0.04x | CPU faster |
+| Q8 | order_items | 27.5M | 44.04 | 85.02 | 0.52x | CPU faster |
+| Q9 | orders+items | 5M+27.5M | 242.58 | 425.68 | 0.57x | CPU faster |
+| Q10 | orders+items | 5M+27.5M | 381.17 | 623.69 | 0.61x | CPU faster |
+| Q11 | orders | 5M | 1967.87 | 6224.69 | 0.32x | CPU faster |
+| Q12 | order_items | 27.5M | 16261.60 | 37828.65 | 0.43x | CPU faster |
 
 ## Summary
 
-### CPU Performance
-- **10K rows**: ~3-4ms per query (overhead dominates)
-- **1M rows**: ~3-4s per query
-- **10M rows**: ~3-4s per query (DuckDB optimization)
-
-### GPU Performance
-Currently blocked by Sirius configuration requirements. GPU execution requires:
-1. Valid SIRIUS_CONFIG_FILE environment variable
-2. Proper configuration format (not documented)
-3. GPU memory allocation setup
+### Performance Analysis
+- GPU (via data_kernel with WGPU) vs CPU (DuckDB) speedup varies by query type
+- Aggregation-heavy queries may benefit more from GPU acceleration
+- Small result sets (LIMIT queries) may have GPU transfer overhead
+- The GPU backend is using Metal for compute
 
 ### Next Steps
-1. Determine correct Sirius config file format
-2. Re-run benchmarks with GPU mode enabled
-3. Test with larger datasets (100M+ rows) where GPU benefits are expected
-4. Profile with nvidia-smi and nsys for detailed GPU metrics
-
-## Observations
-
-1. **DuckDB is highly optimized**: CPU execution is very fast even for 10M rows
-2. **Small datasets**: GPU overhead would likely make it slower than CPU
-3. **Configuration challenge**: Sirius GPU execution requires undocumented config format
-4. **End-to-end pipeline works**: DataFusion → Parquet → DuckDB flow is functional
-
+1. Analyze which query patterns benefit most from GPU acceleration
+2. Test with larger datasets (10M+ rows) to see GPU benefits scale
+3. Profile GPU utilization with Metal/Vulkan tools

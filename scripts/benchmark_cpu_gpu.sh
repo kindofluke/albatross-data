@@ -42,25 +42,25 @@ if ! command -v $DUCKDB_BIN &> /dev/null; then
 fi
 
 # Check data files
-if [ ! -f "$DATA_DIR/orders.parquet" ]; then
+if [ ! -f "$DATA_DIR/orders_1m.parquet" ]; then
     echo -e "${RED}✗ Data file not found: $DATA_DIR/orders.parquet${NC}"
     echo "Run: ./generate_10m_orders.sh"
     exit 1
 fi
 
-if [ ! -f "$DATA_DIR/order_items.parquet" ]; then
+if [ ! -f "$DATA_DIR/order_items_1m.parquet" ]; then
     echo -e "${RED}✗ Data file not found: $DATA_DIR/order_items.parquet${NC}"
     echo "Run: ./generate_10m_orders.sh"
     exit 1
 fi
 
 # Get file sizes
-ORDERS_SIZE=$(du -h "$DATA_DIR/orders.parquet" | cut -f1)
-ITEMS_SIZE=$(du -h "$DATA_DIR/order_items.parquet" | cut -f1)
+ORDERS_SIZE=$(du -h "$DATA_DIR/orders_1m.parquet" | cut -f1)
+ITEMS_SIZE=$(du -h "$DATA_DIR/order_items_1m.parquet" | cut -f1)
 
 echo -e "${GREEN}✓ Data files found:${NC}"
-echo "  orders.parquet: $ORDERS_SIZE"
-echo "  order_items.parquet: $ITEMS_SIZE"
+echo "  orders_1m.parquet: $ORDERS_SIZE"
+echo "  order_items_1m.parquet: $ITEMS_SIZE"
 echo ""
 
 # Initialize results file
@@ -74,8 +74,8 @@ cat > "$OUTPUT" <<EOF
 - **DuckDB**: $($DUCKDB_BIN --version 2>/dev/null || echo "unknown")
 
 ## Datasets
-- **orders.parquet**: 10M rows ($ORDERS_SIZE)
-- **order_items.parquet**: ~55M rows ($ITEMS_SIZE)
+- **orders_1m.parquet**: 1M rows ($ORDERS_SIZE)
+- **order_items_1m.parquet**: ~5.5M rows ($ITEMS_SIZE)
 
 ## Queries
 
@@ -107,8 +107,8 @@ run_cpu_query() {
     
     # Create temp SQL file
     cat > /tmp/bench_cpu.sql <<EOSQL
-CREATE OR REPLACE VIEW orders AS SELECT * FROM '$DATA_DIR/orders.parquet';
-CREATE OR REPLACE VIEW order_items AS SELECT * FROM '$DATA_DIR/order_items.parquet';
+CREATE OR REPLACE VIEW orders AS SELECT * FROM '$DATA_DIR/orders_1m.parquet';
+CREATE OR REPLACE VIEW order_items AS SELECT * FROM '$DATA_DIR/order_items_1m.parquet';
 .timer on
 $query;
 EOSQL
@@ -142,8 +142,8 @@ run_gpu_query() {
     
     # Create temp SQL file with gpu_execution call
     cat > /tmp/bench_gpu.sql <<EOSQL
-CREATE OR REPLACE VIEW orders AS SELECT * FROM '$DATA_DIR/orders.parquet';
-CREATE OR REPLACE VIEW order_items AS SELECT * FROM '$DATA_DIR/order_items.parquet';
+CREATE OR REPLACE VIEW orders AS SELECT * FROM '$DATA_DIR/orders_1m.parquet';
+CREATE OR REPLACE VIEW order_items AS SELECT * FROM '$DATA_DIR/order_items_1m.parquet';
 .timer on
 CALL gpu_execution('$query');
 EOSQL
@@ -197,29 +197,29 @@ echo -e "${GREEN}=== Running Benchmarks ===${NC}"
 echo ""
 
 # Orders queries
-run_benchmark 1 "orders" "10M" \
+run_benchmark 1 "orders" "1M" \
     "SELECT COUNT(*), SUM(amount), AVG(amount), MIN(amount), MAX(amount) FROM orders"
 
-run_benchmark 2 "orders" "10M" \
+run_benchmark 2 "orders" "1M" \
     "SELECT status, COUNT(*) as cnt, SUM(amount) as total FROM orders GROUP BY status ORDER BY cnt DESC"
 
-run_benchmark 3 "orders" "10M" \
+run_benchmark 3 "orders" "1M" \
     "SELECT * FROM orders WHERE amount > 500 AND quantity > 5 LIMIT 1000"
 
-run_benchmark 4 "orders" "10M" \
+run_benchmark 4 "orders" "1M" \
     "SELECT status, AVG(amount), SUM(quantity) FROM orders WHERE amount > 100 GROUP BY status"
 
 # Order items queries
-run_benchmark 5 "order_items" "55M" \
+run_benchmark 5 "order_items" "5.5M" \
     "SELECT COUNT(*), SUM(price * quantity), AVG(price) FROM order_items"
 
-run_benchmark 6 "order_items" "55M" \
+run_benchmark 6 "order_items" "5.5M" \
     "SELECT product_id, COUNT(*) as cnt, SUM(quantity) as qty FROM order_items GROUP BY product_id ORDER BY cnt DESC LIMIT 20"
 
-run_benchmark 7 "order_items" "55M" \
+run_benchmark 7 "order_items" "5.5M" \
     "SELECT * FROM order_items WHERE price > 100 AND quantity > 5 LIMIT 1000"
 
-run_benchmark 8 "order_items" "55M" \
+run_benchmark 8 "order_items" "5.5M" \
     "SELECT product_id, SUM(price * quantity) as revenue FROM order_items GROUP BY product_id ORDER BY revenue DESC LIMIT 20"
 
 # Add summary
