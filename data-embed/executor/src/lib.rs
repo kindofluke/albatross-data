@@ -202,7 +202,7 @@ pub extern "C" fn execute_query_gpu(
 
     // Execute query using async runtime
     let result = get_runtime().block_on(async {
-        let executor = Executor::new(false);
+        let executor = Executor::new(true);  // Enable verbose logging for diagnostics
         executor.execute_to_arrow_gpu(&parquet_files, &table_names, query_str).await
     });
 
