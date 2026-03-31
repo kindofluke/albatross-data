@@ -2,6 +2,7 @@
 pub mod wgsl_shader;
 pub mod wgpu_engine;
 pub mod executor;
+pub mod plan_analyzer;
 
 // GPU infrastructure modules
 pub mod gpu_types;
@@ -69,13 +70,10 @@ pub extern "C" fn execute_query_to_arrow(
         is_gpu_available().await
     });
 
-    // TODO: Re-enable GPU once execute_to_arrow_gpu supports:
-    // - WHERE clauses
-    // - GROUP BY
-    // - COUNT, MIN, MAX, AVG (not just SUM)
-    // - Multiple aggregations in one query
-    // For now, always use CPU path which uses DataFusion correctly
-    if false && gpu_available {
+    // Use plan analyzer to intelligently route queries to GPU or CPU
+    // The execute_to_arrow_gpu function will analyze the physical plan
+    // and automatically fall back to CPU for unsupported operations
+    if gpu_available {
         execute_query_gpu(query, data_path, array_out, schema_out)
     } else {
         execute_query_cpu(query, data_path, array_out, schema_out)

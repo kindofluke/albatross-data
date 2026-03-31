@@ -119,10 +119,12 @@ impl Executor {
         table_names: &[String],
         query: &str,
     ) -> Result<Option<(*const ffi::FFI_ArrowArray, *const ffi::FFI_ArrowSchema)>> {
+        use crate::plan_analyzer::{GpuSuitabilityAnalysis, OperationType};
+
         let total_start = Instant::now();
 
         if self.verbose {
-            println!("Executing on GPU...");
+            println!("Executing with GPU analysis...");
         }
 
         // 1. Create DataFusion context and register tables
@@ -140,25 +142,41 @@ impl Executor {
         let df = ctx.sql(query).await?;
         let physical_plan = df.create_physical_plan().await?;
 
-        // 3. Detect query type to route to appropriate execution path
-        let query_upper = query.to_uppercase();
-        let is_join_query = query_upper.contains("JOIN");
-        let is_aggregation = query_upper.contains("SUM")
-            || query_upper.contains("COUNT")
-            || query_upper.contains("AVG")
-            || query_upper.contains("MIN")
-            || query_upper.contains("MAX")
-            || query_upper.contains("GROUP BY");
+        // 3. Analyze physical plan to determine GPU suitability
+        let analysis = GpuSuitabilityAnalysis::analyze(physical_plan.clone());
 
-        if is_join_query {
-            // Execute join on GPU (currently uses CPU fallback)
-            self.execute_join_gpu(&ctx, physical_plan, total_start).await
-        } else if is_aggregation {
-            // Execute aggregation on GPU
-            self.execute_simple_agg_gpu(&ctx, physical_plan, total_start).await
-        } else {
-            // Execute table scan on CPU (for SELECT * and similar queries)
-            self.execute_table_scan_cpu(&ctx, physical_plan, total_start).await
+        if self.verbose {
+            println!("GPU Analysis: {}", analysis.reason);
+            println!("Operation type: {:?}", analysis.operation_type);
+        }
+
+        // 4. Route to appropriate execution path based on plan analysis
+        match analysis.operation_type {
+            OperationType::HashJoin => {
+                if self.verbose {
+                    println!("Routing to GPU hash join execution");
+                }
+                self.execute_join_gpu(&ctx, physical_plan, total_start).await
+            }
+            OperationType::Aggregation => {
+                if self.verbose {
+                    println!("Routing to GPU aggregation execution");
+                }
+                self.execute_simple_agg_gpu(&ctx, physical_plan, total_start).await
+            }
+            OperationType::Window => {
+                if self.verbose {
+                    println!("Routing to GPU window function execution");
+                }
+                // TODO: Implement GPU window function execution
+                self.execute_table_scan_cpu(&ctx, physical_plan, total_start).await
+            }
+            _ => {
+                if self.verbose {
+                    println!("Routing to CPU execution");
+                }
+                self.execute_table_scan_cpu(&ctx, physical_plan, total_start).await
+            }
         }
     }
 
@@ -225,10 +243,8 @@ impl Executor {
         physical_plan: Arc<dyn datafusion::physical_plan::ExecutionPlan>,
         total_start: Instant,
     ) -> Result<Option<(*const ffi::FFI_ArrowArray, *const ffi::FFI_ArrowSchema)>> {
-        use arrow::array::{Array, Float64Array, Int32Array, StructArray, as_primitive_array, AsArray};
-        use arrow::datatypes::{DataType, Field, Schema, Int32Type, Float64Type, Float32Type};
-        use std::sync::Arc as StdArc;
-        use arrow::record_batch::RecordBatch;
+        use arrow::array::{Array, StructArray};
+        use arrow::datatypes::DataType;
 
         if self.verbose {
             println!("Detected JOIN query - attempting GPU hash join execution");
