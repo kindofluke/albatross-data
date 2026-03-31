@@ -5,7 +5,8 @@ DATA_KERNEL_DIST_DIR := $(DATA_KERNEL_DIR)/dist
 .PHONY: help
 help:
 	@echo "Available targets:"
-	@echo "  build                - Build Rust library and Python wheel"
+	@echo "  build                - Build Rust library and Python wheel (Linux)"
+	@echo "  build-mac            - Build Rust library and Python wheel (macOS)"
 	@echo "  data-kernel-wheel    - Build Python wheel and copy to docker/"
 	@echo "  docker-source-prep   - Copy source files to docker/source/ for Docker build"
 	@echo "  docker-build         - Build Docker image tagged as data_kernel_0_1"
@@ -22,6 +23,16 @@ build:
 	cd $(DATA_KERNEL_DIR) && uv build
 
 .PHONY: build
+
+build-mac:
+	cd data-embed && cargo build --release
+	mkdir -p $(DATA_KERNEL_DIR)/bin
+	cp data-embed/target/release/data-run $(DATA_KERNEL_DIR)/bin/
+	cp data-embed/target/release/libexecutor.dylib $(DATA_KERNEL_DIR)/bin/
+	cp data-embed/target/release/libexecutor.dylib $(DATA_KERNEL_DIR)/src/data_kernel/
+	cd $(DATA_KERNEL_DIR) && uv build
+
+.PHONY: build-mac
 
 # Build data_kernel wheel and copy into docker directory for Docker builds
 .PHONY: data-kernel-wheel
