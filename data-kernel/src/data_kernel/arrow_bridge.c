@@ -34,6 +34,9 @@ extern int32_t execute_query_to_arrow(
     const struct ArrowSchema** schema
 );
 
+extern char* get_last_error_message(void);
+extern void free_error_message(char* ptr);
+
 // GPU detection functions from Rust
 typedef struct {
     char* name;
@@ -84,9 +87,19 @@ static PyObject* execute_query(PyObject* self, PyObject* args) {
     int32_t result = execute_query_to_arrow(query, data_path, &array_ptr, &schema_ptr);
 
     if (result != 0) {
-        char error_msg[256];
-        snprintf(error_msg, sizeof(error_msg), 
-                 "Failed to execute query in Rust (error code: %d)", result);
+        // Get detailed error message from Rust
+        char* rust_error = get_last_error_message();
+        char error_msg[512];
+
+        if (rust_error != NULL) {
+            snprintf(error_msg, sizeof(error_msg),
+                     "SQL Error (code %d): %s", result, rust_error);
+            free_error_message(rust_error);
+        } else {
+            snprintf(error_msg, sizeof(error_msg),
+                     "Failed to execute query in Rust (error code: %d)", result);
+        }
+
         PyErr_SetString(PyExc_RuntimeError, error_msg);
         return NULL;
     }

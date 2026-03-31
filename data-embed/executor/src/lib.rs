@@ -15,7 +15,7 @@ pub mod joins;
 pub mod window;
 
 use std::ffi::{CStr, CString, c_char};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, Mutex};
 use std::path::PathBuf;
 use tokio::runtime::Runtime;
 use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
@@ -23,11 +23,39 @@ use executor::Executor;
 use wgpu_engine::{is_gpu_available, get_gpu_info};
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+static LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
 
 fn get_runtime() -> &'static Runtime {
     RUNTIME.get_or_init(|| {
         Runtime::new().expect("Failed to create Tokio runtime")
     })
+}
+
+fn set_last_error(error: String) {
+    if let Ok(mut last_error) = LAST_ERROR.lock() {
+        *last_error = Some(error);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn get_last_error_message() -> *mut c_char {
+    let error_msg = LAST_ERROR.lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .unwrap_or_else(|| "Unknown error".to_string());
+
+    CString::new(error_msg)
+        .unwrap_or_else(|_| CString::new("Error message contains null byte").unwrap())
+        .into_raw()
+}
+
+#[no_mangle]
+pub extern "C" fn free_error_message(ptr: *mut c_char) {
+    if !ptr.is_null() {
+        unsafe {
+            let _ = CString::from_raw(ptr);
+        }
+    }
 }
 
 #[no_mangle]
@@ -107,7 +135,7 @@ pub extern "C" fn execute_query_cpu(
         let executor = Executor::new(false);
         executor.execute_to_arrow(&parquet_files, &table_names, query_str).await
     });
-    
+
     match result {
         Ok(Some((array_ptr, schema_ptr))) => {
             unsafe {
@@ -116,8 +144,14 @@ pub extern "C" fn execute_query_cpu(
             }
             0
         }
-        Ok(None) => -4, // Empty result
-        Err(_) => -5,   // Execution error
+        Ok(None) => {
+            set_last_error("Query returned no results".to_string());
+            -4
+        }
+        Err(e) => {
+            set_last_error(format!("Query execution failed: {}", e));
+            -5
+        }
     }
 }
 
@@ -173,7 +207,7 @@ pub extern "C" fn execute_query_gpu(
         let executor = Executor::new(false);
         executor.execute_to_arrow_gpu(&parquet_files, &table_names, query_str).await
     });
-    
+
     match result {
         Ok(Some((array_ptr, schema_ptr))) => {
             unsafe {
@@ -182,8 +216,14 @@ pub extern "C" fn execute_query_gpu(
             }
             0
         }
-        Ok(None) => -4, // Empty result
-        Err(_) => -5,   // Execution error
+        Ok(None) => {
+            set_last_error("Query returned no results".to_string());
+            -4
+        }
+        Err(e) => {
+            set_last_error(format!("Query execution failed: {}", e));
+            -5
+        }
     }
 }
 

@@ -11,7 +11,10 @@ dependencies = [
     "ipykernel",
     "pandas",
     "pyarrow",
-    "jupyter-mimetypes"
+    "jupyter-mimetypes", 
+    "tabulate",
+    "jupyterlab", 
+    "duckdb"
 ]
 
 [project.optional-dependencies]
