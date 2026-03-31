@@ -13,7 +13,6 @@ dependencies = [
     "pyarrow",
     "jupyter-mimetypes", 
     "tabulate",
-    "jupyterlab", 
     "duckdb"
 ]
 
