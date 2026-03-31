@@ -67,6 +67,7 @@ fn main(
 "#;
 
 /// Hash join shader - Build phase: Create hash table from build side keys
+/// Uses FNV-1a hash function and quadratic probing for better performance
 pub const HASH_JOIN_BUILD_SHADER: &str = r#"
 struct HashEntry {
     key: atomic<i32>,
@@ -76,10 +77,25 @@ struct HashEntry {
 @group(0) @binding(0) var<storage, read> build_keys: array<i32>;
 @group(0) @binding(1) var<storage, read_write> hash_table: array<HashEntry>;
 
+// FNV-1a hash function - better distribution than simple modulo
 fn hash(key: i32, table_size: u32) -> u32 {
-    // Simple modulo hash
-    let k = u32(key);
-    return k % table_size;
+    // FNV-1a 32-bit constants
+    let FNV_PRIME: u32 = 16777619u;
+    let FNV_OFFSET: u32 = 2166136261u;
+
+    var hash_val = FNV_OFFSET;
+
+    // Hash each byte of the key
+    var k = bitcast<u32>(key);
+    hash_val = (hash_val ^ (k & 0xFFu)) * FNV_PRIME;
+    k = k >> 8u;
+    hash_val = (hash_val ^ (k & 0xFFu)) * FNV_PRIME;
+    k = k >> 8u;
+    hash_val = (hash_val ^ (k & 0xFFu)) * FNV_PRIME;
+    k = k >> 8u;
+    hash_val = (hash_val ^ k) * FNV_PRIME;
+
+    return hash_val % table_size;
 }
 
 @compute @workgroup_size(256)
@@ -88,13 +104,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (idx >= arrayLength(&build_keys)) {
         return;
     }
-    
+
     let key = build_keys[idx];
     let table_size = arrayLength(&hash_table);
-    var slot = hash(key, table_size);
-    
-    // Linear probing to find empty slot
+    let initial_slot = hash(key, table_size);
+
+    // Quadratic probing to find empty slot
+    // Reduces clustering compared to linear probing
     for (var probe = 0u; probe < table_size; probe = probe + 1u) {
+        // Quadratic probing: h(k, i) = (h(k) + i + i²) mod table_size
+        let slot = (initial_slot + probe + probe * probe) % table_size;
+
         let current_exists = atomicLoad(&hash_table[slot].exists);
         if (current_exists == 0u) {
             // Try to claim this slot
@@ -105,20 +125,18 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 return;
             }
         }
-        
+
         // Check if this slot already has our key
         let stored_key = atomicLoad(&hash_table[slot].key);
         if (stored_key == key) {
             return;
         }
-        
-        // Move to next slot
-        slot = (slot + 1u) % table_size;
     }
 }
 "#;
 
 /// Hash join shader - Probe phase: Probe hash table and aggregate matches
+/// Uses FNV-1a hash function and quadratic probing for better performance
 pub const HASH_JOIN_PROBE_SHADER: &str = r#"
 struct HashEntry {
     key: atomic<i32>,
@@ -137,9 +155,25 @@ struct AggregateResult {
 @group(0) @binding(2) var<storage, read> hash_table: array<HashEntry>;
 @group(0) @binding(3) var<storage, read_write> result: AggregateResult;
 
+// FNV-1a hash function - same as build phase for consistency
 fn hash(key: i32, table_size: u32) -> u32 {
-    let k = u32(key);
-    return k % table_size;
+    // FNV-1a 32-bit constants
+    let FNV_PRIME: u32 = 16777619u;
+    let FNV_OFFSET: u32 = 2166136261u;
+
+    var hash_val = FNV_OFFSET;
+
+    // Hash each byte of the key
+    var k = bitcast<u32>(key);
+    hash_val = (hash_val ^ (k & 0xFFu)) * FNV_PRIME;
+    k = k >> 8u;
+    hash_val = (hash_val ^ (k & 0xFFu)) * FNV_PRIME;
+    k = k >> 8u;
+    hash_val = (hash_val ^ (k & 0xFFu)) * FNV_PRIME;
+    k = k >> 8u;
+    hash_val = (hash_val ^ k) * FNV_PRIME;
+
+    return hash_val % table_size;
 }
 
 @compute @workgroup_size(256)
@@ -148,25 +182,28 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (idx >= arrayLength(&probe_keys)) {
         return;
     }
-    
+
     let key = probe_keys[idx];
     let val = probe_values[idx];
     let table_size = arrayLength(&hash_table);
-    var slot = hash(key, table_size);
-    
-    // Linear probing to find matching key
+    let initial_slot = hash(key, table_size);
+
+    // Quadratic probing to find matching key
     for (var probe = 0u; probe < table_size; probe = probe + 1u) {
+        // Quadratic probing: h(k, i) = (h(k) + i + i²) mod table_size
+        let slot = (initial_slot + probe + probe * probe) % table_size;
+
         let exists = atomicLoad(&hash_table[slot].exists);
         if (exists == 0u) {
             // Empty slot means key not found
             return;
         }
-        
+
         let stored_key = atomicLoad(&hash_table[slot].key);
         if (stored_key == key) {
             // Match found! Aggregate the value
             atomicAdd(&result.count, 1u);
-            
+
             // Sum
             loop {
                 let old_bits = atomicLoad(&result.sum);
@@ -178,7 +215,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                     break;
                 }
             }
-            
+
             // Min
             loop {
                 let old_bits = atomicLoad(&result.min);
@@ -192,7 +229,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                     break;
                 }
             }
-            
+
             // Max
             loop {
                 let old_bits = atomicLoad(&result.max);
@@ -206,11 +243,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                     break;
                 }
             }
-            
+
             return;
         }
-        
-        slot = (slot + 1u) % table_size;
     }
 }
 "#;
@@ -326,7 +361,145 @@ fn main(
 
 /// GROUP BY aggregation shader
 /// Computes SUM, COUNT, MIN, MAX for each group
-pub const GROUP_BY_AGG_SHADER: &str = r#"
+/// Two-pass GROUP BY aggregation shader - Pass 1: Workgroup-local reduction
+/// Each workgroup processes its portion and outputs partial results per group
+pub const GROUP_BY_AGG_PASS1_SHADER: &str = r#"
+struct GroupResult {
+    sum: f32,
+    count: u32,
+    min: f32,
+    max: f32,
+}
+
+struct WorkgroupPartial {
+    group_id: u32,
+    sum: f32,
+    count: u32,
+    min: f32,
+    max: f32,
+}
+
+@group(0) @binding(0) var<storage, read> values: array<f32>;
+@group(0) @binding(1) var<storage, read> group_keys: array<u32>;
+@group(0) @binding(2) var<storage, read_write> workgroup_partials: array<WorkgroupPartial>;
+@group(0) @binding(3) var<storage, read_write> num_groups_buffer: array<atomic<u32>>;
+
+// Shared memory for workgroup-local reduction
+// We'll accumulate results for each group locally first
+var<workgroup> local_group_sums: array<f32, 256>;
+var<workgroup> local_group_counts: array<u32, 256>;
+var<workgroup> local_group_mins: array<f32, 256>;
+var<workgroup> local_group_maxs: array<f32, 256>;
+var<workgroup> local_group_ids: array<u32, 256>;
+var<workgroup> unique_groups: array<u32, 256>;
+var<workgroup> group_count: atomic<u32>;
+
+@compute @workgroup_size(256)
+fn main(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(workgroup_id) workgroup_id: vec3<u32>,
+    @builtin(num_workgroups) num_workgroups: vec3<u32>
+) {
+    let idx = global_id.y * 65535u * 256u + global_id.x;
+    let local_idx = local_id.x;
+
+    // Initialize local storage
+    local_group_sums[local_idx] = 0.0;
+    local_group_counts[local_idx] = 0u;
+    local_group_mins[local_idx] = 3.40282347e+38;  // f32::MAX
+    local_group_maxs[local_idx] = -3.40282347e+38; // f32::MIN
+    local_group_ids[local_idx] = 0xFFFFFFFFu;      // Invalid marker
+
+    if (local_idx == 0u) {
+        atomicStore(&group_count, 0u);
+    }
+
+    workgroupBarrier();
+
+    // Load value and group for this thread
+    var my_group: u32 = 0xFFFFFFFFu;
+    var my_val: f32 = 0.0;
+    var has_value: bool = false;
+
+    if (idx < arrayLength(&values)) {
+        my_val = values[idx];
+        my_group = group_keys[idx];
+        has_value = true;
+
+        // Store in local arrays
+        local_group_ids[local_idx] = my_group;
+        local_group_sums[local_idx] = my_val;
+        local_group_counts[local_idx] = 1u;
+        local_group_mins[local_idx] = my_val;
+        local_group_maxs[local_idx] = my_val;
+    }
+
+    workgroupBarrier();
+
+    // Parallel reduction within workgroup for matching groups
+    // Each thread looks for other threads with the same group and combines
+    for (var stride = 1u; stride < 256u; stride = stride * 2u) {
+        if (has_value && (local_idx % (stride * 2u)) == 0u) {
+            let other_idx = local_idx + stride;
+            if (other_idx < 256u && local_group_ids[other_idx] == my_group) {
+                local_group_sums[local_idx] += local_group_sums[other_idx];
+                local_group_counts[local_idx] += local_group_counts[other_idx];
+                local_group_mins[local_idx] = min(local_group_mins[local_idx], local_group_mins[other_idx]);
+                local_group_maxs[local_idx] = max(local_group_maxs[local_idx], local_group_maxs[other_idx]);
+
+                // Mark the other slot as consumed
+                local_group_ids[other_idx] = 0xFFFFFFFFu;
+            }
+        }
+        workgroupBarrier();
+    }
+
+    // Identify unique groups and write partial results
+    if (has_value && local_group_ids[local_idx] != 0xFFFFFFFFu) {
+        let unique_idx = atomicAdd(&group_count, 1u);
+        unique_groups[unique_idx] = local_idx;
+    }
+
+    workgroupBarrier();
+
+    // Write out workgroup partials
+    let num_unique = atomicLoad(&group_count);
+    let wg_idx = workgroup_id.y * num_workgroups.x + workgroup_id.x;
+    let max_groups_per_wg = 256u;  // Max unique groups per workgroup
+
+    if (local_idx < num_unique) {
+        let result_idx = local_idx;
+        let offset = wg_idx * max_groups_per_wg + result_idx;
+
+        if (offset < arrayLength(&workgroup_partials)) {
+            let source_idx = unique_groups[local_idx];
+            workgroup_partials[offset].group_id = local_group_ids[source_idx];
+            workgroup_partials[offset].sum = local_group_sums[source_idx];
+            workgroup_partials[offset].count = local_group_counts[source_idx];
+            workgroup_partials[offset].min = local_group_mins[source_idx];
+            workgroup_partials[offset].max = local_group_maxs[source_idx];
+        }
+    }
+
+    // Store number of unique groups for this workgroup
+    if (local_idx == 0u) {
+        atomicStore(&num_groups_buffer[wg_idx], num_unique);
+    }
+}
+"#;
+
+/// Two-pass GROUP BY aggregation shader - Pass 2: Merge workgroup partials
+/// Combines partial results from all workgroups into final per-group results
+pub const GROUP_BY_AGG_PASS2_SHADER: &str = r#"
+struct WorkgroupPartial {
+    group_id: u32,
+    sum: f32,
+    count: u32,
+    min: f32,
+    max: f32,
+}
+
 struct GroupResult {
     sum: atomic<u32>,
     count: atomic<u32>,
@@ -334,58 +507,63 @@ struct GroupResult {
     max: atomic<u32>,
 }
 
-@group(0) @binding(0) var<storage, read> values: array<f32>;
-@group(0) @binding(1) var<storage, read> group_keys: array<u32>;
+@group(0) @binding(0) var<storage, read> workgroup_partials: array<WorkgroupPartial>;
+@group(0) @binding(1) var<storage, read> num_groups_buffer: array<atomic<u32>>;
 @group(0) @binding(2) var<storage, read_write> results: array<GroupResult>;
 
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    // Support 2D dispatch for large datasets
-    let idx = global_id.y * 65535u * 256u + global_id.x;
-    if (idx >= arrayLength(&values)) {
+    let idx = global_id.x;
+    if (idx >= arrayLength(&workgroup_partials)) {
         return;
     }
-    
-    let val = values[idx];
-    let group_id = group_keys[idx];
-    
+
+    let partial = workgroup_partials[idx];
+
+    // Skip invalid entries
+    if (partial.count == 0u) {
+        return;
+    }
+
+    let group_id = partial.group_id;
+
     // Atomic count
-    atomicAdd(&results[group_id].count, 1u);
-    
+    atomicAdd(&results[group_id].count, partial.count);
+
     // Sum using compare-and-swap
     loop {
         let old_bits = atomicLoad(&results[group_id].sum);
         let old_val = bitcast<f32>(old_bits);
-        let new_val = old_val + val;
+        let new_val = old_val + partial.sum;
         let new_bits = bitcast<u32>(new_val);
         let exchanged = atomicCompareExchangeWeak(&results[group_id].sum, old_bits, new_bits);
         if (exchanged.exchanged) {
             break;
         }
     }
-    
+
     // Min using compare-and-swap
     loop {
         let old_bits = atomicLoad(&results[group_id].min);
         let old_val = bitcast<f32>(old_bits);
-        if (val >= old_val) {
+        if (partial.min >= old_val) {
             break;
         }
-        let new_bits = bitcast<u32>(val);
+        let new_bits = bitcast<u32>(partial.min);
         let exchanged = atomicCompareExchangeWeak(&results[group_id].min, old_bits, new_bits);
         if (exchanged.exchanged) {
             break;
         }
     }
-    
+
     // Max using compare-and-swap
     loop {
         let old_bits = atomicLoad(&results[group_id].max);
         let old_val = bitcast<f32>(old_bits);
-        if (val <= old_val) {
+        if (partial.max <= old_val) {
             break;
         }
-        let new_bits = bitcast<u32>(val);
+        let new_bits = bitcast<u32>(partial.max);
         let exchanged = atomicCompareExchangeWeak(&results[group_id].max, old_bits, new_bits);
         if (exchanged.exchanged) {
             break;
@@ -393,6 +571,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 }
 "#;
+
+// Legacy single-pass GROUP BY shader kept for backward compatibility
+pub const GROUP_BY_AGG_SHADER: &str = GROUP_BY_AGG_PASS1_SHADER;
 
 /// Window function: ROW_NUMBER
 ///

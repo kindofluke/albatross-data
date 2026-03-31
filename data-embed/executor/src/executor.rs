@@ -193,15 +193,89 @@ impl Executor {
 
         // Collect the input data
         let batches: Vec<arrow::record_batch::RecordBatch> =
-            datafusion::physical_plan::collect(physical_plan, ctx.task_ctx()).await?;
+            datafusion::physical_plan::collect(physical_plan.clone(), ctx.task_ctx()).await?;
+
+        if batches.is_empty() {
+            return Ok(None);
+        }
+
         let input_batch = batches.into_iter().next().unwrap();
 
-        // Extract the first column to send to GPU
-        let data_to_process = input_batch.column(0);
+        // Find the first numeric column to aggregate
+        let schema = input_batch.schema();
+        let mut numeric_column_idx = None;
+
+        for (idx, field) in schema.fields().iter().enumerate() {
+            match field.data_type() {
+                DataType::Int32 | DataType::Int64
+                | DataType::UInt32 | DataType::UInt64
+                | DataType::Float32 | DataType::Float64 => {
+                    numeric_column_idx = Some(idx);
+                    break;
+                }
+                _ => continue,
+            }
+        }
+
+        // If no numeric columns found, fall back to CPU
+        let numeric_idx = match numeric_column_idx {
+            Some(idx) => idx,
+            None => {
+                if self.verbose {
+                    println!("No numeric columns found for GPU aggregation, falling back to CPU");
+                }
+                return self.execute_table_scan_cpu(ctx, physical_plan, total_start).await;
+            }
+        };
+
+        let data_to_process = input_batch.column(numeric_idx);
+
+        if self.verbose {
+            println!("Processing column '{}' (index {}) of type {:?} with {} rows",
+                     schema.field(numeric_idx).name(),
+                     numeric_idx,
+                     schema.field(numeric_idx).data_type(),
+                     data_to_process.len());
+        }
+
+        // Handle empty data - return 0 for empty aggregation
+        if data_to_process.len() == 0 {
+            if self.verbose {
+                println!("Column is empty, returning 0");
+            }
+
+            let schema = Schema::new(vec![Field::new("sum", DataType::Float64, false)]);
+            let result_array = Float64Array::from(vec![0.0]);
+            let batch = RecordBatch::try_new(
+                StdArc::new(schema),
+                vec![StdArc::new(result_array) as StdArc<dyn Array>],
+            )?;
+
+            let struct_array = StructArray::from(batch);
+            let array_data = struct_array.to_data();
+            let (ffi_array, ffi_schema) = ffi::to_ffi(&array_data)?;
+
+            let array_ptr = Box::into_raw(Box::new(ffi_array)) as *const FFI_ArrowArray;
+            let schema_ptr = Box::into_raw(Box::new(ffi_schema)) as *const FFI_ArrowSchema;
+
+            return Ok(Some((array_ptr, schema_ptr)));
+        }
 
         // Offload to GPU
         let exec_start = Instant::now();
-        let gpu_result = wgpu_engine::run_sum_aggregation(data_to_process.clone()).await?;
+        let gpu_result = wgpu_engine::run_sum_aggregation(data_to_process.clone()).await;
+
+        // If GPU execution fails, fall back to CPU
+        let gpu_result = match gpu_result {
+            Ok(result) => result,
+            Err(e) => {
+                if self.verbose {
+                    println!("GPU execution failed: {}, falling back to CPU", e);
+                }
+                return self.execute_table_scan_cpu(ctx, physical_plan, total_start).await;
+            }
+        };
+
         let execution_time_ms = exec_start.elapsed().as_millis();
 
         let total_time_ms = total_start.elapsed().as_millis();

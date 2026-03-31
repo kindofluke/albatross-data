@@ -1,6 +1,6 @@
 # Benchmark Results: DuckDB CPU vs data_kernel GPU
 
-**Date**: 2026-03-31 15:12:59
+**Date**: 2026-03-31 15:47:45
 **Hardware**:
 - **CPU**: arm
 - **GPU**: Apple M1 Pro (Metal backend, IntegratedGpu)
@@ -37,18 +37,18 @@
 
 | Query | Dataset | Rows | CPU Time (ms) | GPU Time (ms) | Speedup | Notes |
 |-------|---------|------|---------------|---------------|---------|-------|
-| Q1 | orders | 5M | 32.31 | 121.23 | 0.27x | CPU faster |
-| Q2 | orders | 5M | 15.62 | 42.28 | 0.37x | CPU faster |
-| Q3 | orders | 5M | 4.12 | 42.89 | 0.10x | CPU faster |
-| Q4 | orders | 5M | 25.16 | 50.93 | 0.49x | CPU faster |
-| Q5 | order_items | 27.5M | 122.19 | 46.78 | 2.61x | GPU faster |
-| Q6 | order_items | 27.5M | 78.13 | 89.92 | 0.87x | CPU faster |
-| Q7 | order_items | 27.5M | 3.73 | 94.17 | 0.04x | CPU faster |
-| Q8 | order_items | 27.5M | 44.04 | 85.02 | 0.52x | CPU faster |
-| Q9 | orders+items | 5M+27.5M | 242.58 | 425.68 | 0.57x | CPU faster |
-| Q10 | orders+items | 5M+27.5M | 381.17 | 623.69 | 0.61x | CPU faster |
-| Q11 | orders | 5M | 1967.87 | 6224.69 | 0.32x | CPU faster |
-| Q12 | order_items | 27.5M | 16261.60 | 37828.65 | 0.43x | CPU faster |
+| Q1 | orders | 5M | 55.48 | 87.52 | 0.63x | CPU faster |
+| Q2 | orders | 5M | 51.09 | 54.79 | 0.93x | CPU faster |
+| Q3 | orders | 5M | 4.50 | 80.56 | 0.06x | CPU faster |
+| Q4 | orders | 5M | 30.94 | 139.38 | 0.22x | CPU faster |
+| Q5 | order_items | 27.5M | 277.45 | 65.75 | 4.22x | GPU faster |
+| Q6 | order_items | 27.5M | 98.12 | 76.33 | 1.29x | GPU faster |
+| Q7 | order_items | 27.5M | 3.91 | 193.28 | 0.02x | CPU faster |
+| Q8 | order_items | 27.5M | 52.62 | 107.74 | 0.49x | CPU faster |
+| Q9 | orders+items | 5M+27.5M | 316.99 | 471.01 | 0.67x | CPU faster |
+| Q10 | orders+items | 5M+27.5M | 664.03 | 918.76 | 0.72x | CPU faster |
+| Q11 | orders | 5M | 2099.82 | 451.05 | 4.66x | GPU faster |
+| Q12 | order_items | 27.5M | 12355.80 | 1495.05 | 8.26x | GPU faster |
 
 ## Summary
 

@@ -90,3 +90,22 @@ impl GroupResult {
         }
     }
 }
+
+/// Workgroup-local partial result for GROUP BY aggregations
+///
+/// Used in the 2-pass GROUP BY aggregation to store partial results
+/// from each workgroup before merging in the second pass.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct WorkgroupPartial {
+    /// Group ID this partial result belongs to
+    pub group_id: u32,
+    /// Partial sum (stored as f32)
+    pub sum: f32,
+    /// Partial count
+    pub count: u32,
+    /// Partial minimum (stored as f32)
+    pub min: f32,
+    /// Partial maximum (stored as f32)
+    pub max: f32,
+}

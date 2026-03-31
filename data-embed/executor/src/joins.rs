@@ -73,9 +73,10 @@ impl<'a> JoinOps<'a> {
         probe_keys: &[i32],
         probe_values: &[f32],
     ) -> Result<AggregateResult> {
-        // Hash table size: 2x build side for ~50% load factor
-        // Using power of 2 for efficient modulo via bitwise AND
-        let table_size = (build_keys.len() * 2).next_power_of_two();
+        // Hash table size: 1.33x build side for ~75% load factor
+        // Better memory efficiency while maintaining good performance
+        // Using power of 2 for efficient operations
+        let table_size = ((build_keys.len() * 4) / 3).next_power_of_two();
 
         // === PHASE 1: Build hash table ===
 

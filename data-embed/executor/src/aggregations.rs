@@ -8,10 +8,13 @@ use crate::gpu_buffers::{
     create_output_buffer, create_staging_buffer, create_storage_buffer,
     create_storage_buffer_single, read_buffer_single, read_buffer_vec,
 };
-use crate::gpu_dispatch::{calculate_workgroup_dims, dispatch_1d_default, DEFAULT_WORKGROUP_SIZE};
+use crate::gpu_dispatch::{calculate_workgroup_dims, DEFAULT_WORKGROUP_SIZE};
 use crate::gpu_pipeline::{BufferAccess, PipelineBuilder};
-use crate::gpu_types::{AggregateResult, GroupResult};
-use crate::wgsl_shader::{GLOBAL_AGG_PASS1_SHADER, GLOBAL_AGG_PASS2_SHADER, GROUP_BY_AGG_SHADER};
+use crate::gpu_types::{AggregateResult, GroupResult, WorkgroupPartial};
+use crate::wgsl_shader::{
+    GLOBAL_AGG_PASS1_SHADER, GLOBAL_AGG_PASS2_SHADER, GROUP_BY_AGG_PASS1_SHADER,
+    GROUP_BY_AGG_PASS2_SHADER,
+};
 
 /// Aggregation operations executor
 ///
@@ -147,8 +150,9 @@ impl<'a> AggregationOps<'a> {
 
     /// Execute GROUP BY aggregation (SUM, COUNT, MIN, MAX per group)
     ///
-    /// Computes aggregates for each group using atomic operations on the GPU.
-    /// Each thread processes one value and atomically updates its group's aggregate.
+    /// Uses a two-pass reduction algorithm to minimize atomic contention:
+    /// - Pass 1: Each workgroup reduces its portion locally using shared memory
+    /// - Pass 2: Merge workgroup partial results into final per-group results
     ///
     /// # Arguments
     /// * `values` - Input values to aggregate
@@ -171,22 +175,74 @@ impl<'a> AggregationOps<'a> {
         group_keys: &[u32],
         num_groups: usize,
     ) -> Result<Vec<GroupResult>> {
-        // Create input buffers
+        // Calculate workgroup dimensions for pass 1
+        let (wg_x, wg_y, _) = calculate_workgroup_dims(values.len() as u32, DEFAULT_WORKGROUP_SIZE);
+        let total_workgroups = (wg_x * wg_y) as usize;
+
+        // === PASS 1: Local reduction per workgroup ===
+
         let values_buffer = create_storage_buffer(
             self.device,
             Some("Values Buffer"),
             values,
-            wgpu::BufferUsages::COPY_DST,
+            wgpu::BufferUsages::empty(),
         );
 
         let group_keys_buffer = create_storage_buffer(
             self.device,
             Some("Group Keys Buffer"),
             group_keys,
-            wgpu::BufferUsages::COPY_DST,
+            wgpu::BufferUsages::empty(),
         );
 
-        // Initialize results buffer with default values
+        // Allocate buffer for workgroup partials
+        // Each workgroup can output up to 256 unique groups (worst case)
+        let max_groups_per_workgroup = 256;
+        let max_partials = total_workgroups * max_groups_per_workgroup;
+
+        let init_partials: Vec<WorkgroupPartial> = vec![
+            WorkgroupPartial {
+                group_id: 0,
+                sum: 0.0,
+                count: 0,
+                min: f32::MAX,
+                max: f32::MIN,
+            };
+            max_partials
+        ];
+
+        let workgroup_partials_buffer = create_storage_buffer(
+            self.device,
+            Some("Workgroup Partials Buffer"),
+            &init_partials,
+            wgpu::BufferUsages::COPY_SRC,
+        );
+
+        // Buffer to track number of groups per workgroup
+        let num_groups_buffer = create_output_buffer::<u32>(
+            self.device,
+            Some("Num Groups Buffer"),
+            total_workgroups,
+            wgpu::BufferUsages::empty(),
+        );
+
+        let (pass1_pipeline, pass1_bind_group, _) =
+            PipelineBuilder::new(self.device, GROUP_BY_AGG_PASS1_SHADER)
+                .with_label("GROUP BY Pass 1")
+                .add_buffer(BufferAccess::ReadOnly)  // values
+                .add_buffer(BufferAccess::ReadOnly)  // group_keys
+                .add_buffer(BufferAccess::ReadWrite) // workgroup_partials
+                .add_buffer(BufferAccess::ReadWrite) // num_groups_buffer
+                .build(&[
+                    &values_buffer,
+                    &group_keys_buffer,
+                    &workgroup_partials_buffer,
+                    &num_groups_buffer,
+                ]);
+
+        // === PASS 2: Merge workgroup partials ===
+
+        // Initialize final results buffer
         let init_results: Vec<GroupResult> = (0..num_groups)
             .map(|_| GroupResult {
                 sum: 0_f32.to_bits(),
@@ -203,36 +259,57 @@ impl<'a> AggregationOps<'a> {
             wgpu::BufferUsages::COPY_SRC,
         );
 
+        let (pass2_pipeline, pass2_bind_group, _) =
+            PipelineBuilder::new(self.device, GROUP_BY_AGG_PASS2_SHADER)
+                .with_label("GROUP BY Pass 2")
+                .add_buffer(BufferAccess::ReadOnly)  // workgroup_partials
+                .add_buffer(BufferAccess::ReadOnly)  // num_groups_buffer
+                .add_buffer(BufferAccess::ReadWrite) // results
+                .build(&[
+                    &workgroup_partials_buffer,
+                    &num_groups_buffer,
+                    &results_buffer,
+                ]);
+
         let staging_buffer =
             create_staging_buffer::<GroupResult>(self.device, Some("Staging Buffer"), num_groups);
 
-        // Create compute pipeline
-        let (pipeline, bind_group, _) = PipelineBuilder::new(self.device, GROUP_BY_AGG_SHADER)
-            .with_label("GROUP BY Aggregation")
-            .add_buffer(BufferAccess::ReadOnly)  // values
-            .add_buffer(BufferAccess::ReadOnly)  // group_keys
-            .add_buffer(BufferAccess::ReadWrite) // results
-            .build(&[&values_buffer, &group_keys_buffer, &results_buffer]);
+        // === Execute both passes ===
 
-        // Encode and submit
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("GROUP BY Encoder"),
+                label: Some("Two-Pass GROUP BY Encoder"),
             });
 
+        // Pass 1: Workgroup-local reduction
         {
-            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("GROUP BY Pass"),
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("GROUP BY Pass 1"),
                 timestamp_writes: None,
             });
-            compute_pass.set_pipeline(&pipeline);
-            compute_pass.set_bind_group(0, &bind_group, &[]);
-
-            // Dispatch with automatic 2D fallback for large datasets
-            dispatch_1d_default(&mut compute_pass, values.len() as u32);
+            pass.set_pipeline(&pass1_pipeline);
+            pass.set_bind_group(0, &pass1_bind_group, &[]);
+            pass.dispatch_workgroups(wg_x, wg_y, 1);
         }
 
+        // Pass 2: Merge partial results
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("GROUP BY Pass 2"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pass2_pipeline);
+            pass.set_bind_group(0, &pass2_bind_group, &[]);
+
+            // Dispatch enough workgroups to process all partials
+            let pass2_workgroups = (max_partials as u32)
+                .div_ceil(DEFAULT_WORKGROUP_SIZE)
+                .max(1);
+            pass.dispatch_workgroups(pass2_workgroups, 1, 1);
+        }
+
+        // Copy result to staging buffer
         encoder.copy_buffer_to_buffer(
             &results_buffer,
             0,

@@ -4,7 +4,8 @@
 //! It initializes the GPU device and delegates to specialized operation modules.
 
 use anyhow::{Context, Result};
-use arrow::array::{ArrayRef, Float64Array};
+use arrow::array::{ArrayRef, Float64Array, Float32Array, Int32Array, Int64Array, UInt32Array, UInt64Array};
+use arrow::datatypes::DataType;
 use wgpu::util::DeviceExt;
 
 // Re-export types from submodules for backward compatibility
@@ -91,14 +92,61 @@ pub async fn get_gpu_info() -> Option<GpuInfo> {
 
 /// Runs a SUM aggregation on the GPU.
 ///
-/// This is a placeholder and currently only supports `Float64Array`.
+/// Supports Int32, Int64, UInt32, UInt64, Float32, and Float64 arrays.
 pub async fn run_sum_aggregation(data: ArrayRef) -> Result<f64> {
-    // 1. Downcast to the concrete array type (placeholder)
-    let float_data = data.as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
-        anyhow::anyhow!("GPU execution currently only supports Float64Array")
-    })?;
+    // 1. Get a slice to the input data, avoiding copies where possible
+    // For Float64, we can use the Arrow buffer directly without copying
+    // For other types, we need to convert to f64
 
-    let input_slice: &[f64] = float_data.values();
+    // Use enum to handle both direct slice and owned vector cases
+    enum InputData<'a> {
+        Borrowed(&'a [f64]),
+        Owned(Vec<f64>),
+    }
+
+    let input_data = match data.data_type() {
+        DataType::Float64 => {
+            let arr = data.as_any().downcast_ref::<Float64Array>().unwrap();
+            // Direct slice access - no copy!
+            InputData::Borrowed(arr.values())
+        }
+        DataType::Float32 => {
+            let arr = data.as_any().downcast_ref::<Float32Array>().unwrap();
+            InputData::Owned(arr.values().iter().map(|&v| v as f64).collect())
+        }
+        DataType::Int32 => {
+            let arr = data.as_any().downcast_ref::<Int32Array>().unwrap();
+            InputData::Owned(arr.values().iter().map(|&v| v as f64).collect())
+        }
+        DataType::Int64 => {
+            let arr = data.as_any().downcast_ref::<Int64Array>().unwrap();
+            InputData::Owned(arr.values().iter().map(|&v| v as f64).collect())
+        }
+        DataType::UInt32 => {
+            let arr = data.as_any().downcast_ref::<UInt32Array>().unwrap();
+            InputData::Owned(arr.values().iter().map(|&v| v as f64).collect())
+        }
+        DataType::UInt64 => {
+            let arr = data.as_any().downcast_ref::<UInt64Array>().unwrap();
+            InputData::Owned(arr.values().iter().map(|&v| v as f64).collect())
+        }
+        dt => {
+            return Err(anyhow::anyhow!(
+                "GPU execution does not support data type: {:?}. Supported types: Int32, Int64, UInt32, UInt64, Float32, Float64",
+                dt
+            ));
+        }
+    };
+
+    let input_slice = match &input_data {
+        InputData::Borrowed(slice) => *slice,
+        InputData::Owned(vec) => vec.as_slice(),
+    };
+
+    // Handle empty input data - SUM of empty set is 0
+    if input_slice.is_empty() {
+        return Ok(0.0);
+    }
 
     // 2. Set up WGPU
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
