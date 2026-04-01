@@ -1,0 +1,15 @@
+{
+  "argv": [
+    "python",
+    "-m",
+    "data_kernel",
+    "-f",
+    "{connection_file}"
+  ],
+  "display_name": "Python 3 (data-kernel)",
+  "language": "python",
+  "metadata": {
+    "debugger": false
+  },
+  "interrupt_mode": "message"
+}
