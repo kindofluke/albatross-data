@@ -1,0 +1,15 @@
+{
+  "argv": [
+    "python",
+    "-m",
+    "data_kernel",
+    "-f",
+    "{connection_file}"
+  ],
+  "display_name": "SQL (data-kernel)",
+  "language": "sql",
+  "metadata": {
+    "debugger": false
+  },
+  "interrupt_mode": "message"
+}
