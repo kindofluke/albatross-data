@@ -153,83 +153,102 @@ pub async fn run_sum_aggregation(data: ArrayRef) -> Result<f64> {
     let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions::default()).await.unwrap();
     let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default(), None).await?;
 
-    // 3. Create buffers
-    let input_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("Input Buffer"),
-        contents: bytemuck::cast_slice(input_slice),
-        usage: wgpu::BufferUsages::STORAGE,
-    });
+    // 3. Process in chunks to respect max_storage_buffer_binding_size (128MB)
+    // Each f64 is 8 bytes, so max ~16M elements per chunk
+    const MAX_BUFFER_SIZE: usize = 128 * 1024 * 1024; // 128MB
+    let max_elements_per_chunk = MAX_BUFFER_SIZE / std::mem::size_of::<f64>();
+    let chunk_size = max_elements_per_chunk.min(input_slice.len());
+    
+    let mut total_sum = 0.0f64;
+    
+    for chunk_start in (0..input_slice.len()).step_by(chunk_size) {
+        let chunk_end = (chunk_start + chunk_size).min(input_slice.len());
+        let chunk = &input_slice[chunk_start..chunk_end];
+        
+        // Create buffers for this chunk
+        let input_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Input Buffer"),
+            contents: bytemuck::cast_slice(chunk),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
 
-    let output_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Output Buffer"),
-        size: std::mem::size_of::<f64>() as u64,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+        let output_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Output Buffer"),
+            size: std::mem::size_of::<f64>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
 
-    // 4. Load and configure the shader
-    let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Sum Shader"),
-        source: wgpu::ShaderSource::Wgsl(wgsl_shader::SUM_SHADER.into()),
-    });
+        // 4. Load and configure the shader
+        let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Sum Shader"),
+            source: wgpu::ShaderSource::Wgsl(wgsl_shader::SUM_SHADER.into()),
+        });
 
-    // 5. Set up the pipeline
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Sum Pipeline"),
-        layout: None,
-        module: &shader_module,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
+        // 5. Set up the pipeline
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Sum Pipeline"),
+            layout: None,
+            module: &shader_module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
 
-    // 6. Create bind group to link buffers to shader
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("Sum Bind Group"),
-        layout: &pipeline.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: input_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: output_buf.as_entire_binding(),
-            },
-        ],
-    });
+        // 6. Create bind group to link buffers to shader
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Sum Bind Group"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: output_buf.as_entire_binding(),
+                },
+            ],
+        });
 
-    // 7. Dispatch the compute shader
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-    {
-        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-        cpass.set_pipeline(&pipeline);
-        cpass.set_bind_group(0, &bind_group, &[]);
-        cpass.dispatch_workgroups(input_slice.len() as u32, 1, 1); // One thread per element
+        // 7. Dispatch the compute shader
+        // Workgroup size is 256 (defined in shader), so dispatch ceil(n / 256) workgroups
+        let workgroup_size = 256u32;
+        let num_workgroups = (chunk.len() as u32 + workgroup_size - 1) / workgroup_size;
+        
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            cpass.set_pipeline(&pipeline);
+            cpass.set_bind_group(0, &bind_group, &[]);
+            cpass.dispatch_workgroups(num_workgroups, 1, 1);
+        }
+        queue.submit(Some(encoder.finish()));
+
+        // 8. Read back the result for this chunk
+        let staging_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Staging Buffer"),
+            size: std::mem::size_of::<f64>() as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        encoder.copy_buffer_to_buffer(&output_buf, 0, &staging_buf, 0, std::mem::size_of::<f64>() as u64);
+        queue.submit(Some(encoder.finish()));
+
+        // 9. Map the staging buffer and get the result
+        let buffer_slice = staging_buf.slice(..);
+        buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::Maintain::Wait);
+
+        let data = buffer_slice.get_mapped_range();
+        let chunk_sum: f64 = bytemuck::from_bytes::<f64>(&data).clone();
+        
+        total_sum += chunk_sum;
     }
-    queue.submit(Some(encoder.finish()));
 
-    // 8. Read back the result
-    let staging_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Staging Buffer"),
-        size: std::mem::size_of::<f64>() as u64,
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-    encoder.copy_buffer_to_buffer(&output_buf, 0, &staging_buf, 0, std::mem::size_of::<f64>() as u64);
-    queue.submit(Some(encoder.finish()));
-
-    // 9. Map the staging buffer and get the result
-    let buffer_slice = staging_buf.slice(..);
-    buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
-    device.poll(wgpu::Maintain::Wait);
-
-    let data = buffer_slice.get_mapped_range();
-    let result: f64 = bytemuck::from_bytes::<f64>(&data).clone();
-
-    Ok(result)
+    Ok(total_sum)
 }
 
 /// Main GPU execution engine

@@ -191,15 +191,33 @@ impl Executor {
         use std::sync::Arc as StdArc;
         use arrow::record_batch::RecordBatch;
 
-        // Collect the input data
+        // Extract the table scan from the aggregation plan
+        // Typical plan structure: AggregateExec -> ProjectionExec -> ParquetExec
+        let table_scan_plan = self.find_table_scan(physical_plan.clone())?;
+
+        if self.verbose {
+            println!("Found table scan: {}", table_scan_plan.name());
+        }
+
+        // Execute ONLY the table scan to get raw data (not the aggregation)
         let batches: Vec<arrow::record_batch::RecordBatch> =
-            datafusion::physical_plan::collect(physical_plan.clone(), ctx.task_ctx()).await?;
+            datafusion::physical_plan::collect(table_scan_plan, ctx.task_ctx()).await?;
 
         if batches.is_empty() {
             return Ok(None);
         }
 
-        let input_batch = batches.into_iter().next().unwrap();
+        // Concatenate all batches into one for GPU processing
+        let input_batch = if batches.len() == 1 {
+            batches.into_iter().next().unwrap()
+        } else {
+            let schema = batches[0].schema();
+            arrow::compute::concat_batches(&schema, &batches)?
+        };
+
+        if self.verbose {
+            println!("Loaded {} rows from table scan for GPU aggregation", input_batch.num_rows());
+        }
 
         // Find the first numeric column to aggregate
         let schema = input_batch.schema();
@@ -429,6 +447,39 @@ impl Executor {
         let schema_ptr = Box::into_raw(Box::new(ffi_schema)) as *const FFI_ArrowSchema;
 
         Ok(Some((array_ptr, schema_ptr)))
+    }
+
+    /// Recursively find the table scan (ParquetExec) in the physical plan
+    fn find_table_scan(
+        &self,
+        plan: Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+    ) -> Result<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
+        let plan_name = plan.name();
+
+        // If this is a table scan, return it
+        if plan_name == "ParquetExec" || plan_name == "CsvExec" || plan_name == "MemoryExec" {
+            return Ok(plan);
+        }
+
+        // Otherwise, recurse into children
+        let children = plan.children();
+        if children.is_empty() {
+            return Err(anyhow::anyhow!("No table scan found in physical plan"));
+        }
+
+        // For aggregations, the table scan is typically the last child
+        // Try last child first, then first child
+        if let Some(child) = children.last() {
+            if let Ok(scan) = self.find_table_scan(Arc::clone(child)) {
+                return Ok(scan);
+            }
+        }
+
+        if let Some(child) = children.first() {
+            return self.find_table_scan(Arc::clone(child));
+        }
+
+        Err(anyhow::anyhow!("No table scan found in physical plan"))
     }
 
     pub async fn execute(

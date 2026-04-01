@@ -23,14 +23,14 @@ def execute(sql: str):
         >>> from data_kernel import execute
         >>> result = execute("SELECT * FROM my_table")
     """
-    arrow_array = arrow_bridge.execute_query(sql)
+    arrow_recordbatch = arrow_bridge.execute_query(sql)
 
-    if arrow_array is None:
+    if arrow_recordbatch is None:
         return None
 
-    # Convert Arrow array to pandas DataFrame
-    result_list = arrow_array.to_pylist()
-    return pd.DataFrame({'result': result_list})
+    # Convert Arrow RecordBatch directly to pandas DataFrame
+    # This preserves the schema and column names from the query result
+    return arrow_recordbatch.to_pandas()
 
 
 def is_gpu_available() -> bool:
