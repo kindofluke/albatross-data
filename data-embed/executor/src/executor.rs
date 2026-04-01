@@ -164,18 +164,24 @@ impl Executor {
                 }
                 self.execute_simple_agg_gpu(&ctx, physical_plan, total_start).await
             }
+            OperationType::GroupBy => {
+                if self.verbose {
+                    println!("Routing GROUP BY aggregation to GPU execution");
+                }
+                self.execute_group_by_gpu(&ctx, physical_plan, total_start).await
+            }
             OperationType::Window => {
                 if self.verbose {
-                    println!("Routing to GPU window function execution");
+                    println!("Routing window function to CPU execution");
                 }
-                // TODO: Implement GPU window function execution
-                self.execute_table_scan_cpu(&ctx, physical_plan, total_start).await
+                // Window functions not yet implemented on GPU - execute full query on CPU
+                self.execute_full_query_cpu(&ctx, physical_plan, total_start).await
             }
             _ => {
                 if self.verbose {
                     println!("Routing to CPU execution");
                 }
-                self.execute_table_scan_cpu(&ctx, physical_plan, total_start).await
+                self.execute_full_query_cpu(&ctx, physical_plan, total_start).await
             }
         }
     }
@@ -329,6 +335,133 @@ impl Executor {
         Ok(Some((array_ptr, schema_ptr)))
     }
 
+    async fn execute_group_by_gpu(
+        &self,
+        ctx: &SessionContext,
+        physical_plan: Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+        total_start: Instant,
+    ) -> Result<Option<(*const ffi::FFI_ArrowArray, *const ffi::FFI_ArrowSchema)>> {
+        use arrow::record_batch::RecordBatch;
+        use datafusion::physical_plan::aggregates::AggregateExec;
+
+        if self.verbose {
+            println!("Attempting GPU GROUP BY execution");
+        }
+
+        // Try to downcast to AggregateExec to extract GROUP BY and aggregation info
+        let agg_exec = match physical_plan.as_any().downcast_ref::<AggregateExec>() {
+            Some(exec) => exec,
+            None => {
+                if self.verbose {
+                    println!("Could not downcast to AggregateExec, falling back to CPU");
+                }
+                return self.execute_full_query_cpu(ctx, physical_plan, total_start).await;
+            }
+        };
+
+        // Extract GROUP BY columns and aggregation expressions
+        let group_expr = agg_exec.group_expr();
+        let group_by_cols = group_expr.expr();
+        let aggr_exprs = agg_exec.aggr_expr();
+
+        if group_by_cols.is_empty() {
+            if self.verbose {
+                println!("No GROUP BY columns found");
+            }
+            return self.execute_full_query_cpu(ctx, physical_plan, total_start).await;
+        }
+
+        if self.verbose {
+            println!("Found {} GROUP BY column(s) and {} aggregation(s)",
+                group_by_cols.len(), aggr_exprs.len());
+            for (i, expr) in group_by_cols.iter().enumerate() {
+                println!("  GROUP BY [{}]: {:?}", i, expr);
+            }
+            for (i, expr) in aggr_exprs.iter().enumerate() {
+                println!("  AGGREGATE [{}]: {:?}", i, expr);
+            }
+        }
+
+        // Extract table scan and get raw data
+        let table_scan_plan = match self.find_table_scan(physical_plan.clone()) {
+            Ok(scan) => scan,
+            Err(e) => {
+                if self.verbose {
+                    println!("Could not find table scan: {}, falling back to CPU", e);
+                }
+                return self.execute_full_query_cpu(ctx, physical_plan, total_start).await;
+            }
+        };
+
+        if self.verbose {
+            println!("Found table scan: {}", table_scan_plan.name());
+        }
+
+        // Execute table scan to get raw data
+        let batches: Vec<RecordBatch> =
+            datafusion::physical_plan::collect(table_scan_plan, ctx.task_ctx()).await?;
+
+        if batches.is_empty() {
+            return Ok(None);
+        }
+
+        // Concatenate all batches
+        let input_batch = if batches.len() == 1 {
+            batches.into_iter().next().unwrap()
+        } else {
+            let schema = batches[0].schema();
+            arrow::compute::concat_batches(&schema, &batches)?
+        };
+
+        let num_rows = input_batch.num_rows();
+
+        if self.verbose {
+            println!("Loaded {} rows from table scan", num_rows);
+            println!("Schema: {:?}", input_batch.schema());
+        }
+
+        // VALIDATION: Check if dataset is suitable for GPU
+        const MAX_ROWS_FOR_GPU: usize = 10_000_000; // 10M rows
+        const MIN_ROWS_FOR_GPU: usize = 10_000; // Below this, CPU is faster
+
+        if num_rows > MAX_ROWS_FOR_GPU {
+            if self.verbose {
+                println!("Dataset too large for GPU ({} > {} rows), falling back to CPU",
+                    num_rows, MAX_ROWS_FOR_GPU);
+            }
+            return self.execute_full_query_cpu(ctx, physical_plan, total_start).await;
+        }
+
+        if num_rows < MIN_ROWS_FOR_GPU {
+            if self.verbose {
+                println!("Dataset too small for GPU benefit ({} < {} rows), falling back to CPU",
+                    num_rows, MIN_ROWS_FOR_GPU);
+            }
+            return self.execute_full_query_cpu(ctx, physical_plan, total_start).await;
+        }
+
+        // TODO: Complete GPU GROUP BY implementation
+        // Still need to:
+        // 1. Parse aggregation expressions to identify source columns
+        // 2. Extract GROUP BY column and convert to group IDs
+        // 3. Extract aggregation columns
+        // 4. Call GPU GROUP BY for each aggregation
+        // 5. Handle multiple aggregation functions (COUNT + SUM)
+        // 6. Apply ORDER BY (need GPU sort)
+        // 7. Format results as Arrow arrays
+
+        if self.verbose {
+            println!("GPU GROUP BY execution partially implemented");
+            println!("Validation passed: {} rows suitable for GPU", num_rows);
+            println!("Falling back to CPU for now - still need:");
+            println!("  - Aggregation expression parsing");
+            println!("  - Multi-column aggregation support");
+            println!("  - Post-aggregation sorting");
+        }
+
+        self.execute_full_query_cpu(ctx, physical_plan, total_start).await
+    }
+
     async fn execute_join_gpu(
         &self,
         ctx: &SessionContext,
@@ -392,6 +525,58 @@ impl Executor {
 
         // Convert the first batch to FFI format
         let struct_array = StructArray::from(first_batch.clone());
+        let array_data = struct_array.to_data();
+
+        let (ffi_array, ffi_schema) = ffi::to_ffi(&array_data)?;
+
+        let array_ptr = Box::into_raw(Box::new(ffi_array)) as *const FFI_ArrowArray;
+        let schema_ptr = Box::into_raw(Box::new(ffi_schema)) as *const FFI_ArrowSchema;
+
+        Ok(Some((array_ptr, schema_ptr)))
+    }
+
+    async fn execute_full_query_cpu(
+        &self,
+        ctx: &SessionContext,
+        physical_plan: Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+        total_start: Instant,
+    ) -> Result<Option<(*const ffi::FFI_ArrowArray, *const ffi::FFI_ArrowSchema)>> {
+        use arrow::array::{Array, StructArray};
+
+        if self.verbose {
+            println!("Executing full query on CPU");
+        }
+
+        // Execute the query using DataFusion on CPU
+        let exec_start = Instant::now();
+        let batches: Vec<arrow::record_batch::RecordBatch> =
+            datafusion::physical_plan::collect(physical_plan, ctx.task_ctx()).await?;
+        let execution_time_ms = exec_start.elapsed().as_millis();
+
+        if batches.is_empty() {
+            if self.verbose {
+                println!("Query returned no results");
+            }
+            return Ok(None);
+        }
+
+        // Concatenate all batches into a single batch
+        let schema = batches[0].schema();
+        let combined_batch = if batches.len() == 1 {
+            batches.into_iter().next().unwrap()
+        } else {
+            arrow::compute::concat_batches(&schema, &batches)?
+        };
+
+        if self.verbose {
+            println!("Query completed - {} rows returned", combined_batch.num_rows());
+            println!("Schema: {} columns", schema.fields().len());
+            println!("Execution time: {}ms", execution_time_ms);
+            println!("Total time: {}ms", total_start.elapsed().as_millis());
+        }
+
+        // Convert the combined batch to FFI format
+        let struct_array = StructArray::from(combined_batch);
         let array_data = struct_array.to_data();
 
         let (ffi_array, ffi_schema) = ffi::to_ffi(&array_data)?;
