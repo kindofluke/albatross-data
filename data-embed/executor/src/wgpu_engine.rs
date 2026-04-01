@@ -153,11 +153,14 @@ pub async fn run_sum_aggregation(data: ArrayRef) -> Result<f64> {
     let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions::default()).await.unwrap();
     let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default(), None).await?;
 
-    // 3. Process in chunks to respect max_storage_buffer_binding_size (128MB)
-    // Each f64 is 8 bytes, so max ~16M elements per chunk
-    const MAX_BUFFER_SIZE: usize = 128 * 1024 * 1024; // 128MB
-    let max_elements_per_chunk = MAX_BUFFER_SIZE / std::mem::size_of::<f64>();
-    let chunk_size = max_elements_per_chunk.min(input_slice.len());
+    // 3. Process in chunks respecting both buffer size (128MB) and workgroup limits (65535)
+    // Workgroup size is 256, max dispatch is 65535 workgroups
+    // So max elements per chunk = 65535 * 256 = 16,777,088
+    const MAX_WORKGROUPS: usize = 65535;
+    const WORKGROUP_SIZE: usize = 256;
+    const MAX_ELEMENTS_PER_CHUNK: usize = MAX_WORKGROUPS * WORKGROUP_SIZE; // ~16.7M elements
+    
+    let chunk_size = MAX_ELEMENTS_PER_CHUNK.min(input_slice.len());
     
     let mut total_sum = 0.0f64;
     
