@@ -6,7 +6,6 @@
 use anyhow::{Context, Result};
 use arrow::array::{ArrayRef, Float64Array, Float32Array, Int32Array, Int64Array, UInt32Array, UInt64Array};
 use arrow::datatypes::DataType;
-use wgpu::util::DeviceExt;
 
 // Re-export types from submodules for backward compatibility
 pub use crate::gpu_types::{AggregateResult, GroupResult};
@@ -15,6 +14,9 @@ use crate::aggregations::AggregationOps;
 use crate::joins::JoinOps;
 use crate::window::WindowOps;
 use crate::wgsl_shader;
+use crate::gpu_dispatch::{calculate_workgroup_dims, DEFAULT_WORKGROUP_SIZE};
+use crate::gpu_pipeline::{BufferAccess, PipelineBuilder};
+use crate::gpu_buffers::{create_storage_buffer, create_output_buffer, create_storage_buffer_single, create_staging_buffer, read_buffer_single};
 
 /// Information about the GPU device
 #[derive(Debug, Clone)]
@@ -90,45 +92,38 @@ pub async fn get_gpu_info() -> Option<GpuInfo> {
     })
 }
 
-/// Runs a SUM aggregation on the GPU.
+/// Runs a SUM aggregation on the GPU using two-pass reduction.
 ///
 /// Supports Int32, Int64, UInt32, UInt64, Float32, and Float64 arrays.
+/// Uses a two-pass approach to minimize atomic contention:
+/// - Pass 1: Each workgroup reduces locally (no contention)
+/// - Pass 2: Merge workgroup results (minimal contention)
 pub async fn run_sum_aggregation(data: ArrayRef) -> Result<f64> {
-    // 1. Get a slice to the input data, avoiding copies where possible
-    // For Float64, we can use the Arrow buffer directly without copying
-    // For other types, we need to convert to f64
-
-    // Use enum to handle both direct slice and owned vector cases
-    enum InputData<'a> {
-        Borrowed(&'a [f64]),
-        Owned(Vec<f64>),
-    }
-
-    let input_data = match data.data_type() {
+    // 1. Convert input data to f32 (GPU shader expects f32)
+    let values_f32: Vec<f32> = match data.data_type() {
         DataType::Float64 => {
             let arr = data.as_any().downcast_ref::<Float64Array>().unwrap();
-            // Direct slice access - no copy!
-            InputData::Borrowed(arr.values())
+            arr.values().iter().map(|&v| v as f32).collect()
         }
         DataType::Float32 => {
             let arr = data.as_any().downcast_ref::<Float32Array>().unwrap();
-            InputData::Owned(arr.values().iter().map(|&v| v as f64).collect())
+            arr.values().to_vec()
         }
         DataType::Int32 => {
             let arr = data.as_any().downcast_ref::<Int32Array>().unwrap();
-            InputData::Owned(arr.values().iter().map(|&v| v as f64).collect())
+            arr.values().iter().map(|&v| v as f32).collect()
         }
         DataType::Int64 => {
             let arr = data.as_any().downcast_ref::<Int64Array>().unwrap();
-            InputData::Owned(arr.values().iter().map(|&v| v as f64).collect())
+            arr.values().iter().map(|&v| v as f32).collect()
         }
         DataType::UInt32 => {
             let arr = data.as_any().downcast_ref::<UInt32Array>().unwrap();
-            InputData::Owned(arr.values().iter().map(|&v| v as f64).collect())
+            arr.values().iter().map(|&v| v as f32).collect()
         }
         DataType::UInt64 => {
             let arr = data.as_any().downcast_ref::<UInt64Array>().unwrap();
-            InputData::Owned(arr.values().iter().map(|&v| v as f64).collect())
+            arr.values().iter().map(|&v| v as f32).collect()
         }
         dt => {
             return Err(anyhow::anyhow!(
@@ -138,98 +133,119 @@ pub async fn run_sum_aggregation(data: ArrayRef) -> Result<f64> {
         }
     };
 
-    let input_slice = match &input_data {
-        InputData::Borrowed(slice) => *slice,
-        InputData::Owned(vec) => vec.as_slice(),
-    };
-
-    // Handle empty input data - SUM of empty set is 0
-    if input_slice.is_empty() {
+    // Handle empty input - SUM of empty set is 0
+    if values_f32.is_empty() {
         return Ok(0.0);
     }
 
-    // 2. Set up WGPU
+    // 2. Set up GPU device and queue
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
-    let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions::default()).await.unwrap();
-    let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default(), None).await?;
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions::default())
+        .await
+        .context("Failed to find GPU adapter")?;
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor::default(), None)
+        .await?;
 
-    // 3. Create buffers
-    let input_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("Input Buffer"),
-        contents: bytemuck::cast_slice(input_slice),
-        usage: wgpu::BufferUsages::STORAGE,
+    // 3. Calculate workgroup dimensions for pass 1
+    let (wg_x, wg_y, _) = calculate_workgroup_dims(values_f32.len() as u32, DEFAULT_WORKGROUP_SIZE);
+    let total_workgroups = (wg_x * wg_y) as usize;
+
+    // === PASS 1: Local reduction per workgroup ===
+
+    let values_buffer = create_storage_buffer(
+        &device,
+        Some("Values Buffer"),
+        &values_f32,
+        wgpu::BufferUsages::empty(),
+    );
+
+    let workgroup_results_buffer = create_output_buffer::<AggregateResult>(
+        &device,
+        Some("Workgroup Results Buffer"),
+        total_workgroups,
+        wgpu::BufferUsages::COPY_SRC,
+    );
+
+    let (pass1_pipeline, pass1_bind_group, _) =
+        PipelineBuilder::new(&device, wgsl_shader::GLOBAL_AGG_PASS1_SHADER)
+            .with_label("Sum Pass 1")
+            .add_buffer(BufferAccess::ReadOnly)  // values
+            .add_buffer(BufferAccess::ReadWrite) // workgroup_results
+            .build(&[&values_buffer, &workgroup_results_buffer]);
+
+    // === PASS 2: Final reduction ===
+
+    let init_result = AggregateResult {
+        sum: 0_f32.to_bits(),
+        count: 0,
+        min: f32::MAX.to_bits(),
+        max: f32::MIN.to_bits(),
+    };
+
+    let final_result_buffer = create_storage_buffer_single(
+        &device,
+        Some("Final Result Buffer"),
+        &init_result,
+        wgpu::BufferUsages::COPY_SRC,
+    );
+
+    let (pass2_pipeline, pass2_bind_group, _) =
+        PipelineBuilder::new(&device, wgsl_shader::GLOBAL_AGG_PASS2_SHADER)
+            .with_label("Sum Pass 2")
+            .add_buffer(BufferAccess::ReadOnly)  // workgroup_results
+            .add_buffer(BufferAccess::ReadWrite) // final_result
+            .build(&[&workgroup_results_buffer, &final_result_buffer]);
+
+    let staging_buffer = create_staging_buffer::<AggregateResult>(&device, Some("Staging Buffer"), 1);
+
+    // === Execute both passes ===
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Two-Pass Sum Encoder"),
     });
 
-    let output_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Output Buffer"),
-        size: std::mem::size_of::<f64>() as u64,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-
-    // 4. Load and configure the shader
-    let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Sum Shader"),
-        source: wgpu::ShaderSource::Wgsl(wgsl_shader::SUM_SHADER.into()),
-    });
-
-    // 5. Set up the pipeline
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Sum Pipeline"),
-        layout: None,
-        module: &shader_module,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-
-    // 6. Create bind group to link buffers to shader
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("Sum Bind Group"),
-        layout: &pipeline.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: input_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: output_buf.as_entire_binding(),
-            },
-        ],
-    });
-
-    // 7. Dispatch the compute shader
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    // Pass 1: Local reduction
     {
-        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-        cpass.set_pipeline(&pipeline);
-        cpass.set_bind_group(0, &bind_group, &[]);
-        cpass.dispatch_workgroups(input_slice.len() as u32, 1, 1); // One thread per element
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("Sum Pass 1"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pass1_pipeline);
+        pass.set_bind_group(0, &pass1_bind_group, &[]);
+        pass.dispatch_workgroups(wg_x, wg_y, 1);
     }
+
+    // Pass 2: Final reduction
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("Sum Pass 2"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pass2_pipeline);
+        pass.set_bind_group(0, &pass2_bind_group, &[]);
+
+        let pass2_workgroups = (total_workgroups as u32)
+            .div_ceil(DEFAULT_WORKGROUP_SIZE)
+            .max(1);
+        pass.dispatch_workgroups(pass2_workgroups, 1, 1);
+    }
+
+    // Copy result to staging buffer
+    encoder.copy_buffer_to_buffer(
+        &final_result_buffer,
+        0,
+        &staging_buffer,
+        0,
+        std::mem::size_of::<AggregateResult>() as u64,
+    );
+
     queue.submit(Some(encoder.finish()));
 
-    // 8. Read back the result
-    let staging_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Staging Buffer"),
-        size: std::mem::size_of::<f64>() as u64,
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-    encoder.copy_buffer_to_buffer(&output_buf, 0, &staging_buf, 0, std::mem::size_of::<f64>() as u64);
-    queue.submit(Some(encoder.finish()));
-
-    // 9. Map the staging buffer and get the result
-    let buffer_slice = staging_buf.slice(..);
-    buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
-    device.poll(wgpu::Maintain::Wait);
-
-    let data = buffer_slice.get_mapped_range();
-    let result: f64 = bytemuck::from_bytes::<f64>(&data).clone();
-
-    Ok(result)
+    // 4. Read result from GPU and convert to f64
+    let result = read_buffer_single::<AggregateResult>(&device, &staging_buffer).await?;
+    Ok(result.sum_f32() as f64)
 }
 
 /// Main GPU execution engine

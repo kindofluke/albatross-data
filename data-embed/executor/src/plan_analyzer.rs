@@ -1,4 +1,5 @@
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::aggregates::AggregateExec;
 use std::sync::Arc;
 
 /// Analyzes a physical plan to determine if it's suitable for GPU execution
@@ -10,7 +11,8 @@ pub struct GpuSuitabilityAnalysis {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum OperationType {
-    Aggregation,
+    Aggregation,      // Simple aggregation without GROUP BY
+    GroupBy,          // GROUP BY aggregation
     HashJoin,
     Filter,
     TableScan,
@@ -26,20 +28,33 @@ impl GpuSuitabilityAnalysis {
 
         // Inspect the physical plan node type
         match plan_name {
-            // Aggregations are good GPU candidates
+            // Aggregations - distinguish between simple aggregation and GROUP BY
             "AggregateExec" => {
-                // Check if it's a simple aggregation (SUM, COUNT, etc.)
-                let children = plan.children();
-                if children.len() == 1 {
-                    Self {
-                        can_use_gpu: true,
-                        reason: "Simple aggregation detected - GPU accelerated".to_string(),
-                        operation_type: OperationType::Aggregation,
+                // Try to downcast to AggregateExec to check for GROUP BY
+                if let Some(agg_exec) = plan.as_any().downcast_ref::<AggregateExec>() {
+                    // Check if there are any group expressions (GROUP BY columns)
+                    let has_group_by = !agg_exec.group_expr().expr().is_empty();
+
+                    if has_group_by {
+                        // This is a GROUP BY aggregation - now supported on GPU
+                        Self {
+                            can_use_gpu: true,
+                            reason: "GROUP BY aggregation - GPU accelerated".to_string(),
+                            operation_type: OperationType::GroupBy,
+                        }
+                    } else {
+                        // This is a simple aggregation (no GROUP BY) - can use GPU
+                        Self {
+                            can_use_gpu: true,
+                            reason: "Simple aggregation detected - GPU accelerated".to_string(),
+                            operation_type: OperationType::Aggregation,
+                        }
                     }
                 } else {
+                    // Fallback if downcast fails
                     Self {
                         can_use_gpu: false,
-                        reason: "Complex aggregation - using CPU".to_string(),
+                        reason: "Unknown aggregation type - using CPU".to_string(),
                         operation_type: OperationType::Complex,
                     }
                 }

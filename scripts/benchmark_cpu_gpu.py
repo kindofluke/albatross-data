@@ -72,43 +72,48 @@ def run_cpu_query(con, query_num, table, query):
     elapsed_ms, result = run_query(con, query)
 
     if elapsed_ms is None:
-        return "ERROR"
+        return "ERROR", None
 
-    print(f"  CPU: {elapsed_ms:.2f}ms")
-    return f"{elapsed_ms:.2f}"
+    print(f"  CPU: {elapsed_ms:.2f}ms | Result: {result[0] if result else 'None'}")
+    return f"{elapsed_ms:.2f}", result
 
 def run_gpu_query(query_num, table, query, has_gpu):
     """Run query on GPU using data_kernel (if available)"""
     if not has_gpu or not HAS_DATA_KERNEL:
-        return "N/A"
+        return "N/A", None
 
     print_color(f"Q{query_num} GPU: {table}", BLUE)
 
     # Use data_kernel for GPU execution
     try:
         start = time.time()
-        result = gpu_execute(query)
-        if result is not None:
-            # Access the result to ensure full execution
-            _ = result['result'].to_list()
+        result_df = gpu_execute(query)
         end = time.time()
         elapsed_ms = (end - start) * 1000
 
-        print(f"  GPU: {elapsed_ms:.2f}ms")
-        return f"{elapsed_ms:.2f}"
+        # Convert DataFrame to tuple format matching DuckDB output
+        result_val = None
+        if result_df is not None and not result_df.empty:
+            # Convert first row to tuple for comparison
+            result_val = [tuple(result_df.iloc[0].values)]
+
+        print(f"  GPU: {elapsed_ms:.2f}ms | Result: {result_val}")
+        return f"{elapsed_ms:.2f}", result_val
     except Exception as e:
         print(f"  GPU execution error: {e}")
-        return "ERROR"
+        import traceback
+        traceback.print_exc()
+        return "ERROR", None
 
 def run_benchmark(con, query_num, table, rows, query, has_gpu, output_file):
     """Run benchmark for both CPU and GPU"""
-    cpu_time_str = run_cpu_query(con, query_num, table, query)
-    gpu_time_str = run_gpu_query(query_num, table, query, has_gpu)
+    cpu_time_str, cpu_result = run_cpu_query(con, query_num, table, query)
+    gpu_time_str, gpu_result = run_gpu_query(query_num, table, query, has_gpu)
 
     # Calculate speedup
     if gpu_time_str == "N/A" or gpu_time_str == "ERROR":
         speedup = "N/A"
-        notes = "GPU not available"
+        notes = "GPU not available" if gpu_time_str == "N/A" else "GPU error"
     elif cpu_time_str == "ERROR":
         speedup = "N/A"
         notes = "CPU query failed"
@@ -117,7 +122,10 @@ def run_benchmark(con, query_num, table, rows, query, has_gpu, output_file):
         gpu_time = float(gpu_time_str)
         speedup_val = cpu_time / gpu_time
         speedup = f"{speedup_val:.2f}"
-        notes = "GPU faster" if speedup_val > 1 else "CPU faster"
+        
+        # Check result correctness
+        results_match = "✓" if cpu_result == gpu_result else "✗"
+        notes = f"GPU faster {results_match}" if speedup_val > 1 else f"CPU faster {results_match}"
 
     output_file.write(f"| Q{query_num} | {table} | {rows} | {cpu_time_str} | {gpu_time_str} | {speedup}x | {notes} |\n")
     print()
@@ -276,23 +284,32 @@ def main():
         f.write("\n## Summary\n\n")
         f.write("### Performance Analysis\n")
         if has_gpu:
-            f.write("- GPU (via data_kernel with WGPU) vs CPU (DuckDB) speedup varies by query type\n")
-            f.write("- Aggregation-heavy queries may benefit more from GPU acceleration\n")
-            f.write("- Small result sets (LIMIT queries) may have GPU transfer overhead\n")
-            f.write("- The GPU backend is using " + (gpu_info_dict['backend'] if gpu_info_dict else "unknown") + " for compute\n")
+            f.write("- GPU execution now processes **raw data** (5M+ rows) instead of pre-aggregated results\n")
+            f.write("- Simple aggregations (SUM) are GPU-accelerated on raw parquet data\n")
+            f.write("- The GPU backend uses " + (gpu_info_dict['backend'] if gpu_info_dict else "unknown") + " for compute\n")
+            f.write("- ✓ marks indicate GPU results match CPU results (correctness verified)\n")
+            f.write("- ✗ marks indicate result mismatch (implementation incomplete)\n\n")
+            f.write("**Current GPU Support:**\n")
+            f.write("- ✓ Simple SUM aggregations on single columns\n")
+            f.write("- ✗ COUNT, AVG, MIN, MAX (not yet implemented)\n")
+            f.write("- ✗ GROUP BY operations (routes to CPU)\n")
+            f.write("- ✗ JOINs (routes to CPU)\n")
+            f.write("- ✗ Window functions (routes to CPU)\n")
         else:
             f.write("- CPU-only benchmarks completed\n")
             f.write("- Install data_kernel Python package to enable GPU comparison\n")
 
         f.write("\n### Next Steps\n")
-        if not has_gpu:
+        if has_gpu:
+            f.write("1. Implement COUNT, AVG, MIN, MAX aggregations on GPU\n")
+            f.write("2. Add GROUP BY support for GPU execution\n")
+            f.write("3. Implement hash joins on GPU\n")
+            f.write("4. Add window function support\n")
+            f.write("5. Test with larger datasets (10M+ rows) to measure GPU scaling\n")
+        else:
             f.write("1. Install data_kernel package: `cd data-kernel && pip install -e .`\n")
             f.write("2. Ensure GPU drivers are installed (Metal for macOS, Vulkan for Linux/Windows)\n")
             f.write("3. Re-run to get GPU comparison\n")
-        else:
-            f.write("1. Analyze which query patterns benefit most from GPU acceleration\n")
-            f.write("2. Test with larger datasets (10M+ rows) to see GPU benefits scale\n")
-            f.write("3. Profile GPU utilization with Metal/Vulkan tools\n")
 
     con.close()
 
