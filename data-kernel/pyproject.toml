@@ -30,5 +30,5 @@ build-backend = "setuptools.build_meta"
 packages = ["data_kernel"]
 
 [tool.setuptools.package-data]
-data_kernel = ["*.so"]
+data_kernel = ["*.so", "*.dylib"]
 

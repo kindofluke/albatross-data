@@ -24,3 +24,4 @@ bytemuck = { version = "1.14", features = ["derive"] }
 pollster = "0.3"
 futures = "0.3"
 rand.workspace = true
+serde_json = { workspace = true }

@@ -36,6 +36,7 @@ extern int32_t execute_query_to_arrow(
 
 extern char* get_last_error_message(void);
 extern void free_error_message(char* ptr);
+extern char* list_tables(const char* data_path);
 
 // GPU detection functions from Rust
 typedef struct {
@@ -81,8 +82,8 @@ static PyObject* execute_query(PyObject* self, PyObject* args) {
         data_path = "/opt/data";
     }
 
-    const struct FFI_ArrowArray* array_ptr = NULL;
-    const struct FFI_ArrowSchema* schema_ptr = NULL;
+    const struct ArrowArray* array_ptr = NULL;
+    const struct ArrowSchema* schema_ptr = NULL;
 
     int32_t result = execute_query_to_arrow(query, data_path, &array_ptr, &schema_ptr);
 
@@ -279,10 +280,42 @@ static PyObject* get_gpu_info(PyObject* self, PyObject* args) {
     return dict;
 }
 
+static PyObject* py_list_tables(PyObject* self, PyObject* args) {
+    // Get data path from environment or use default
+    const char* data_path = getenv("DATA_PATH");
+    if (data_path == NULL) {
+        data_path = "/opt/data";
+    }
+
+    // Call Rust list_tables function
+    char* json_str = list_tables(data_path);
+
+    if (json_str == NULL) {
+        // Get error message from Rust
+        char* rust_error = get_last_error_message();
+        if (rust_error != NULL) {
+            PyErr_SetString(PyExc_RuntimeError, rust_error);
+            free_error_message(rust_error);
+        } else {
+            PyErr_SetString(PyExc_RuntimeError, "Failed to get table metadata");
+        }
+        return NULL;
+    }
+
+    // Convert C string to Python string
+    PyObject* result = PyUnicode_FromString(json_str);
+
+    // Free the C string
+    free_error_message(json_str);
+
+    return result;
+}
+
 static PyMethodDef ArrowBridgeMethods[] = {
     {"execute_query", execute_query, METH_VARARGS, "Execute a SQL query and return a pyarrow.Table"},
     {"check_gpu", check_gpu, METH_NOARGS, "Check if GPU is available"},
     {"get_gpu_info", get_gpu_info, METH_NOARGS, "Get detailed GPU information"},
+    {"list_tables", py_list_tables, METH_NOARGS, "Get metadata for all available Parquet tables as JSON"},
     {NULL, NULL, 0, NULL}
 };
 

@@ -1,6 +1,5 @@
 from ipykernel.kernelbase import Kernel
 import os
-from . import arrow_bridge
 
 try:
     from jupyter_mimetypes._proxy import _ProxyObject
@@ -24,6 +23,7 @@ class DataKernel(Kernel):
                    allow_stdin=False):
         if not silent:
             try:
+                from . import arrow_bridge
                 arrow_array = arrow_bridge.execute_query(code)
 
                 if arrow_array is not None:

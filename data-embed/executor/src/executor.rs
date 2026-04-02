@@ -1325,4 +1325,101 @@ Converting to Substrait...");
 
         Ok((buf, substrait_plan))
     }
+
+    pub async fn get_tables_metadata(
+        &self,
+        parquet_files: &[PathBuf],
+        table_names: &[String],
+    ) -> Result<String> {
+        use serde_json::json;
+        use std::fs;
+
+        if self.verbose {
+            println!("Collecting metadata for {} table(s)...", parquet_files.len());
+        }
+
+        // Create DataFusion context
+        let ctx = SessionContext::new();
+
+        // Register parquet files
+        for (table_name, path) in table_names.iter().zip(parquet_files.iter()) {
+            if self.verbose {
+                println!("  - Registering {} -> {:?}", table_name, path);
+            }
+            ctx.register_parquet(
+                table_name,
+                path.to_str().unwrap(),
+                ParquetReadOptions::default()
+            ).await?;
+        }
+
+        // Collect metadata for each table
+        let mut tables_json = Vec::new();
+
+        for (table_name, path) in table_names.iter().zip(parquet_files.iter()) {
+            if self.verbose {
+                println!("  - Getting metadata for {}", table_name);
+            }
+
+            // Get table from catalog
+            let catalog = ctx.catalog("datafusion").unwrap();
+            let schema = catalog.schema("public").unwrap();
+            let table = schema.table(table_name).await.unwrap().unwrap();
+            let table_schema = table.schema();
+
+            // Get row count by executing COUNT(*)
+            let count_query = format!("SELECT COUNT(*) as count FROM {}", table_name);
+            let df = ctx.sql(&count_query).await?;
+            let batches = df.collect().await?;
+
+            let num_rows = if !batches.is_empty() && batches[0].num_rows() > 0 {
+                use arrow::array::*;
+                let count_array = batches[0].column(0);
+                if let Some(int64_array) = count_array.as_any().downcast_ref::<Int64Array>() {
+                    int64_array.value(0) as u64
+                } else if let Some(uint64_array) = count_array.as_any().downcast_ref::<UInt64Array>() {
+                    uint64_array.value(0)
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+
+            // Get file size
+            let file_size_bytes = match fs::metadata(path) {
+                Ok(metadata) => metadata.len(),
+                Err(_) => 0,
+            };
+
+            // Build columns metadata
+            let mut columns_json = Vec::new();
+            for field in table_schema.fields() {
+                columns_json.push(json!({
+                    "name": field.name(),
+                    "data_type": format!("{:?}", field.data_type()),
+                    "nullable": field.is_nullable(),
+                }));
+            }
+
+            // Build table metadata
+            tables_json.push(json!({
+                "name": table_name,
+                "file_path": path.to_str().unwrap(),
+                "num_rows": num_rows,
+                "file_size_bytes": file_size_bytes,
+                "columns": columns_json,
+            }));
+        }
+
+        let result = json!({
+            "tables": tables_json
+        });
+
+        if self.verbose {
+            println!("Metadata collection complete");
+        }
+
+        Ok(serde_json::to_string_pretty(&result)?)
+    }
 }

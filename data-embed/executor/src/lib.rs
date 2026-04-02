@@ -354,3 +354,76 @@ pub extern "C" fn free_gpu_info(info: *mut CGpuInfo) {
         // info_box is dropped here, freeing the struct
     }
 }
+
+/// Get metadata for all available Parquet tables as JSON
+///
+/// Returns a JSON string with table metadata, or null on error.
+/// Caller must free the returned pointer using free_error_message().
+#[no_mangle]
+pub extern "C" fn list_tables(data_path: *const c_char) -> *mut c_char {
+    // Safety: caller must ensure data_path is a valid C string
+    let data_path_str = unsafe {
+        match CStr::from_ptr(data_path).to_str() {
+            Ok(s) => s,
+            Err(_) => {
+                set_last_error("Invalid data_path string".to_string());
+                return std::ptr::null_mut();
+            }
+        }
+    };
+
+    // Find parquet files in data_path
+    let parquet_files: Vec<PathBuf> = match std::fs::read_dir(data_path_str) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("parquet"))
+            .collect(),
+        Err(e) => {
+            set_last_error(format!("Failed to read directory: {}", e));
+            return std::ptr::null_mut();
+        }
+    };
+
+    if parquet_files.is_empty() {
+        // Return empty tables array
+        let empty_json = r#"{"tables":[]}"#;
+        return match CString::new(empty_json) {
+            Ok(s) => s.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        };
+    }
+
+    // Generate table names from file stems
+    let table_names: Vec<String> = parquet_files
+        .iter()
+        .map(|f| {
+            f.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("table")
+                .to_string()
+        })
+        .collect();
+
+    // Get metadata using async runtime
+    let result = get_runtime().block_on(async {
+        let executor = Executor::new(false);
+        executor.get_tables_metadata(&parquet_files, &table_names).await
+    });
+
+    match result {
+        Ok(json_string) => {
+            match CString::new(json_string) {
+                Ok(c_string) => c_string.into_raw(),
+                Err(e) => {
+                    set_last_error(format!("Failed to create C string: {}", e));
+                    std::ptr::null_mut()
+                }
+            }
+        }
+        Err(e) => {
+            set_last_error(format!("Failed to get table metadata: {}", e));
+            std::ptr::null_mut()
+        }
+    }
+}
